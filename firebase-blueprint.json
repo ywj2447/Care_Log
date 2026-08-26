@@ -1,0 +1,36 @@
+{
+  "entities": {
+    "care_logs": {
+      "title": "Care Logs",
+      "description": "Generated welfare daily logs and program logs",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "clientName": { "type": "string" },
+        "date": { "type": "string" },
+        "type": { "type": "string" },
+        "content": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "clientName", "date", "type", "content", "createdAt"]
+    },
+    "batch_presets": {
+      "title": "Batch Presets",
+      "description": "Saved client batch templates",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "name": { "type": "string" },
+        "clients": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "name", "clients", "updatedAt"]
+    }
+  },
+  "auth": {
+    "providers": ["anonymous"]
+  },
+  "firestore": {
+    "indexes": []
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "CareLog",
+  "description": "장애인 주간이용시설 직원을 위한 전문 기록 작성 지원 도구입니다. 간단한 입력으로 생활일지와 프로그램일지를 전문적인 문체로 자동 생성합니다.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
