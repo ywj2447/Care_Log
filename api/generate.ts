@@ -1,4 +1,4 @@
-import { generateCareLog } from "../src/server/geminiService";
+import { generateCareLog } from "./_lib/geminiService.js";
 
 export default async function handler(req: any, res: any) {
   // Ensure response is always JSON with proper headers
