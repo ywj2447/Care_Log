@@ -16,8 +16,6 @@ import {
   AlertCircle,
   Copy,
   ChevronDown,
-  ChevronLeft,
-  ChevronRight,
   Trash2,
   Dog,
   Settings,
@@ -25,7 +23,10 @@ import {
   Eye,
   EyeOff,
   Database,
-  Cloud
+  Cloud,
+  Palette,
+  LogOut,
+  Check
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import Inko from "inko/index.js";
@@ -36,9 +37,20 @@ import {
   subscribeToCareLogs, 
   SavedLogItem,
   saveBatchClientsToCloud,
-  loadBatchClientsFromCloud
+  loadBatchClientsFromCloud,
+  saveDraftToCloud,
+  loadDraftFromCloud,
+  subscribeToAuthState,
+  signInWithGoogle,
+  logoutUser,
+  firebaseOptions
 } from "./lib/firebase";
+import { User as FirebaseUser } from "firebase/auth";
 import { CloudLogsModal } from "./components/CloudLogsModal";
+import { DateChangeModal } from "./components/DateChangeModal";
+import { DomainAuthModal } from "./components/DomainAuthModal";
+import { LIVING_LOG_KEYWORD_GROUPS, PROGRAM_LOG_KEYWORD_GROUPS } from "./constants/careKeywords";
+import { CategoryHeaderWithKeywords, SimpleCategoryHeader } from "./components/CategoryHeaderWithKeywords";
 
 import carelogClLogo from "./assets/images/carelog_cl_separated_1779430172627.png";
 
@@ -66,6 +78,22 @@ export default function App() {
   const [showApiKey, setShowApiKey] = useState(false);
   const [savedCloudLogs, setSavedCloudLogs] = useState<SavedLogItem[]>([]);
   const [showCloudModal, setShowCloudModal] = useState(false);
+  const [showDomainAuthModal, setShowDomainAuthModal] = useState(false);
+
+  // Firebase Auth & Cloud Sync State
+  const [currentUser, setCurrentUser] = useState<FirebaseUser | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [cloudSyncStatus, setCloudSyncStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [firestoreStatus, setFirestoreStatus] = useState<"connected" | "error" | "disconnected">("disconnected");
+  const [notificationMessage, setNotificationMessage] = useState<string | null>(null);
+  const lastDraftHashRef = React.useRef<string>("");
+
+  const showNotice = (msg: string) => {
+    setNotificationMessage(msg);
+    setTimeout(() => {
+      setNotificationMessage((prev) => (prev === msg ? null : prev));
+    }, 4000);
+  };
 
   const [activeEditIndex, setActiveEditIndex] = useState(0);
   const [isBatchMode, setIsBatchMode] = useState(() => localStorage.getItem("carelog_is_batch_mode") === "true");
@@ -121,6 +149,15 @@ export default function App() {
   });
   const [type, setType] = useState<LogType>(() => (localStorage.getItem("w_type") as LogType) || "생활일지");
   
+  // 클라우드 저장 여부 상태 (인증된 사용자만 활성화 가능, 기본값: localStorage 설정값 확인)
+  const [autoSaveToCloud, setAutoSaveToCloud] = useState<boolean>(() => {
+    const saved = localStorage.getItem("carelog_auto_save_cloud");
+    return saved === "true";
+  });
+
+  // 날짜 변경 시 확인 모달 상태
+  const [pendingDateChange, setPendingDateChange] = useState<string | null>(null);
+  
   // 생활일지 관련 state
   const [transit, setTransit] = useState(() => localStorage.getItem("w_transit") || "");
   const [hygiene, setHygiene] = useState(() => localStorage.getItem("w_hygiene") || "");
@@ -135,6 +172,53 @@ export default function App() {
   const [support, setSupport] = useState(() => localStorage.getItem("w_support") || "");
   const [reaction, setReaction] = useState(() => localStorage.getItem("w_reaction") || "");
   const [plan, setPlan] = useState(() => localStorage.getItem("w_plan") || "");
+
+  // 추천 키워드 열림 상태 (카테고리별 토글)
+  const [openKeywordCategory, setOpenKeywordCategory] = useState<string | null>(null);
+
+  const toggleKeywordCategory = (catKey: string) => {
+    setOpenKeywordCategory(prev => prev === catKey ? null : catKey);
+  };
+
+  const appendKeywordText = (current: string, keyword: string) => {
+    const trimmed = current.trim();
+    if (!trimmed) return keyword;
+    if (trimmed.endsWith(",") || trimmed.endsWith(".")) {
+      return `${trimmed} ${keyword}`;
+    }
+    return `${trimmed}, ${keyword}`;
+  };
+
+  // 단일 모드용 키워드 추가
+  const handleSingleKeywordAppend = (
+    field: "transit" | "hygiene" | "diet" | "health" | "program" | "others" | "programName" | "observation" | "support" | "reaction" | "plan",
+    keyword: string
+  ) => {
+    switch (field) {
+      case "transit": setTransit(prev => appendKeywordText(prev, keyword)); break;
+      case "hygiene": setHygiene(prev => appendKeywordText(prev, keyword)); break;
+      case "diet": setDiet(prev => appendKeywordText(prev, keyword)); break;
+      case "health": setHealth(prev => appendKeywordText(prev, keyword)); break;
+      case "program": setProgram(prev => appendKeywordText(prev, keyword)); break;
+      case "others": setOthers(prev => appendKeywordText(prev, keyword)); break;
+      case "programName": setProgramName(prev => appendKeywordText(prev, keyword)); break;
+      case "observation": setObservation(prev => appendKeywordText(prev, keyword)); break;
+      case "support": setSupport(prev => appendKeywordText(prev, keyword)); break;
+      case "reaction": setReaction(prev => appendKeywordText(prev, keyword)); break;
+      case "plan": setPlan(prev => appendKeywordText(prev, keyword)); break;
+    }
+  };
+
+  // 일괄 모드용 키워드 추가
+  const handleBatchKeywordAppend = (
+    field: keyof BatchClient,
+    keyword: string
+  ) => {
+    const updated = [...batchClients];
+    const curVal = (updated[activeEditIndex] && updated[activeEditIndex][field]) as string || "";
+    (updated[activeEditIndex] as any)[field] = appendKeywordText(curVal, keyword);
+    setBatchClients(updated);
+  };
 
   const [result, setResult] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -181,11 +265,168 @@ export default function App() {
     return count;
   };
 
-  // Subscribe to Firebase real-time care logs and initialize cloud data
+  // 날짜 변경 시 작성된 내용이 있는지 확인
+  const checkIfHasContent = () => {
+    if (isBatchMode) {
+      const hasAnyClientContent = batchClients.some(c => 
+        c.name.trim() || 
+        c.transit?.trim() || 
+        c.hygiene?.trim() || 
+        c.diet?.trim() || 
+        (c.health?.trim() && c.health.trim() !== "양호함 / 체온: 정상") ||
+        c.program?.trim() || 
+        c.others?.trim() ||
+        c.programName?.trim() || 
+        c.observation?.trim() || 
+        c.support?.trim() || 
+        c.reaction?.trim() || 
+        c.plan?.trim()
+      );
+      return hasAnyClientContent || result.trim().length > 0;
+    } else {
+      const hasSingleContent = 
+        name.trim() || 
+        transit.trim() || 
+        hygiene.trim() || 
+        diet.trim() || 
+        health.trim() || 
+        program.trim() || 
+        others.trim() ||
+        programName.trim() || 
+        observation.trim() || 
+        support.trim() || 
+        reaction.trim() || 
+        plan.trim() || 
+        result.trim();
+      return !!hasSingleContent;
+    }
+  };
+
+  // 사용자가 날짜를 변경하려고 할 때 호출
+  const handleDateChangeRequest = (newDateVal: string) => {
+    if (newDateVal === date) return;
+    
+    // 내용이 있으면 확인 모달 열기
+    if (checkIfHasContent()) {
+      setPendingDateChange(newDateVal);
+    } else {
+      // 내용이 없으면 즉시 변경
+      setDate(newDateVal);
+      localStorage.setItem("w_date_manually_changed", "true");
+    }
+  };
+
+  // 날짜 변경 모달에서 선택한 작업 수행
+  const handleConfirmDateChange = (action: "clear_all" | "keep_names" | "keep_all") => {
+    if (!pendingDateChange) return;
+    const targetDate = pendingDateChange;
+
+    if (action === "clear_all") {
+      // 전부 삭제 (이름 포함 완전 초기화)
+      setName("");
+      setTransit("");
+      setHygiene("");
+      setDiet("");
+      setHealth("");
+      setProgram("");
+      setOthers("");
+      setProgramName("");
+      setObservation("");
+      setSupport("");
+      setReaction("");
+      setPlan("");
+      setResult("");
+      setError("");
+      setBatchClients(Array.from({ length: 6 }, () => ({
+        name: "",
+        transit: "",
+        hygiene: "",
+        diet: "",
+        health: "양호함 / 체온: 정상",
+        program: "",
+        others: "",
+        programName: "",
+        observation: "",
+        support: "",
+        reaction: "",
+        plan: ""
+      })));
+    } else if (action === "keep_names") {
+      // 이용인 이름만 유지하고 세부 작성 내용 및 결과 비우기
+      setTransit("");
+      setHygiene("");
+      setDiet("");
+      setHealth("");
+      setProgram("");
+      setOthers("");
+      setProgramName("");
+      setObservation("");
+      setSupport("");
+      setReaction("");
+      setPlan("");
+      setResult("");
+      setError("");
+      setBatchClients(prev => prev.map(c => ({
+        name: c.name,
+        transit: "",
+        hygiene: "",
+        diet: "",
+        health: "양호함 / 체온: 정상",
+        program: "",
+        others: "",
+        programName: "",
+        observation: "",
+        support: "",
+        reaction: "",
+        plan: ""
+      })));
+    } else {
+      // keep_all: 삭제 안 하고 날짜만 변경 (아무 것도 안 지움)
+    }
+
+    setDate(targetDate);
+    localStorage.setItem("w_date_manually_changed", "true");
+    setPendingDateChange(null);
+  };
+
+  // Listen to Firebase Authentication state changes
   useEffect(() => {
-    const unsubscribe = subscribeToCareLogs((logs) => {
-      setSavedCloudLogs(logs);
+    const unsubscribeAuth = subscribeToAuthState((user) => {
+      setCurrentUser(user);
+      setIsAuthLoading(false);
+
+      if (!user) {
+        setAutoSaveToCloud(false);
+        setSavedCloudLogs([]);
+      } else {
+        const savedAuto = localStorage.getItem("carelog_auto_save_cloud");
+        if (savedAuto === "true") {
+          setAutoSaveToCloud(true);
+        }
+      }
     });
+
+    return () => {
+      unsubscribeAuth();
+    };
+  }, []);
+
+  // When user is authenticated, subscribe to user-isolated care logs and cloud batch presets
+  useEffect(() => {
+    if (!currentUser) {
+      setSavedCloudLogs([]);
+      setFirestoreStatus("disconnected");
+      return;
+    }
+
+    const unsubscribeLogs = subscribeToCareLogs(
+      (logs) => {
+        setSavedCloudLogs(logs);
+      },
+      (status) => {
+        setFirestoreStatus(status);
+      }
+    );
 
     // Try loading cloud batch clients if localStorage is default
     loadBatchClientsFromCloud().then((cloudClients) => {
@@ -198,9 +439,241 @@ export default function App() {
     });
 
     return () => {
-      unsubscribe();
+      unsubscribeLogs();
     };
-  }, []);
+  }, [currentUser]);
+
+  // Debounced auto-save of current draft to cloud (1.5s debounce, only if autoSaveToCloud & currentUser)
+  useEffect(() => {
+    if (!autoSaveToCloud || !currentUser) {
+      return;
+    }
+
+    const draftData = {
+      date,
+      type,
+      name,
+      transit,
+      hygiene,
+      diet,
+      health,
+      program,
+      others,
+      programName,
+      observation,
+      support,
+      reaction,
+      plan,
+      isBatchMode,
+      batchClients,
+      result
+    };
+
+    const draftHash = JSON.stringify(draftData);
+    if (draftHash === lastDraftHashRef.current) {
+      return;
+    }
+
+    // Only save if there is some meaningful content
+    const hasAnyContent = checkIfHasContent();
+    if (!hasAnyContent) {
+      return;
+    }
+
+    const debounceTimer = setTimeout(async () => {
+      try {
+        setCloudSyncStatus("saving");
+        const success = await saveDraftToCloud(draftData);
+        if (!success) {
+          throw new Error("Draft write was not confirmed by Firestore");
+        }
+        lastDraftHashRef.current = draftHash;
+        setCloudSyncStatus("saved");
+        setTimeout(() => {
+          setCloudSyncStatus((prev) => (prev === "saved" ? "idle" : prev));
+        }, 2000);
+      } catch (err) {
+        console.warn("Auto-save draft notice:", err);
+        setCloudSyncStatus("error");
+        setTimeout(() => {
+          setCloudSyncStatus((prev) => (prev === "error" ? "idle" : prev));
+        }, 3000);
+      }
+    }, 1500);
+
+    return () => {
+      clearTimeout(debounceTimer);
+    };
+  }, [
+    autoSaveToCloud,
+    currentUser,
+    date,
+    type,
+    name,
+    transit,
+    hygiene,
+    diet,
+    health,
+    program,
+    others,
+    programName,
+    observation,
+    support,
+    reaction,
+    plan,
+    isBatchMode,
+    batchClients,
+    result
+  ]);
+
+  // Toggle "클라우드 보관함에 자동저장"
+  const handleToggleAutoSave = async () => {
+    if (!autoSaveToCloud) {
+      // User wants to turn ON auto-save
+      if (!currentUser) {
+        try {
+          const user = await signInWithGoogle();
+          if (user) {
+            setAutoSaveToCloud(true);
+            localStorage.setItem("carelog_auto_save_cloud", "true");
+            showNotice(`${user.displayName || user.email?.split("@")[0]}님 환영합니다! 클라우드 자동저장이 활성화되었습니다.`);
+
+            // Immediately sync draft
+            if (checkIfHasContent()) {
+              setCloudSyncStatus("saving");
+              const saved = await saveDraftToCloud({
+                date,
+                type,
+                name,
+                transit,
+                hygiene,
+                diet,
+                health,
+                program,
+                others,
+                programName,
+                observation,
+                support,
+                reaction,
+                plan,
+                isBatchMode,
+                batchClients,
+                result
+              });
+              if (saved) {
+                setCloudSyncStatus("saved");
+                setTimeout(() => setCloudSyncStatus("idle"), 2500);
+              } else {
+                setCloudSyncStatus("error");
+                setTimeout(() => setCloudSyncStatus("idle"), 3000);
+              }
+            }
+          }
+        } catch (err: any) {
+          // If login failed or user cancelled popup
+          setAutoSaveToCloud(false);
+          localStorage.setItem("carelog_auto_save_cloud", "false");
+          if (err?.code === "auth/unauthorized-domain") {
+            setShowDomainAuthModal(true);
+            showNotice("Firebase 승인 도메인 등록이 필요합니다. 안내 창을 확인해 주세요.");
+          } else if (
+            err?.code !== "auth/popup-closed-by-user" &&
+            err?.code !== "auth/cancelled-popup-request"
+          ) {
+            showNotice(err?.message || "Google 로그인에 실패했습니다. 작성 중인 내용은 안전하게 로컬에 유지됩니다.");
+          }
+        }
+      } else {
+        // User already logged in
+        setAutoSaveToCloud(true);
+        localStorage.setItem("carelog_auto_save_cloud", "true");
+        showNotice("클라우드 자동저장이 활성화되었습니다.");
+
+        if (checkIfHasContent()) {
+          setCloudSyncStatus("saving");
+          saveDraftToCloud({
+            date,
+            type,
+            name,
+            transit,
+            hygiene,
+            diet,
+            health,
+            program,
+            others,
+            programName,
+            observation,
+            support,
+            reaction,
+            plan,
+            isBatchMode,
+            batchClients,
+            result
+          }).then((saved) => {
+            if (saved) {
+              setCloudSyncStatus("saved");
+              setTimeout(() => setCloudSyncStatus("idle"), 2000);
+            } else {
+              setCloudSyncStatus("error");
+              setTimeout(() => setCloudSyncStatus("idle"), 3000);
+            }
+          }).catch(() => {
+            setCloudSyncStatus("error");
+            setTimeout(() => setCloudSyncStatus("idle"), 3000);
+          });
+        }
+      }
+    } else {
+      // User turns OFF auto-save
+      setAutoSaveToCloud(false);
+      localStorage.setItem("carelog_auto_save_cloud", "false");
+      showNotice("클라우드 자동저장이 비활성화되었습니다. (로컬 저장은 계속 유지됩니다)");
+    }
+  };
+
+  // Direct Google login (e.g. from header button or modal)
+  const handleGoogleLogin = async () => {
+    try {
+      const user = await signInWithGoogle();
+      if (user) {
+        setAutoSaveToCloud(true);
+        localStorage.setItem("carelog_auto_save_cloud", "true");
+        showNotice(`${user.displayName || user.email?.split("@")[0]}님 환영합니다!`);
+      }
+    } catch (err: any) {
+      if (err?.code === "auth/unauthorized-domain") {
+        setShowDomainAuthModal(true);
+        showNotice("Firebase 승인 도메인 등록이 필요합니다. 안내 창을 확인해 주세요.");
+      } else if (
+        err?.code !== "auth/popup-closed-by-user" &&
+        err?.code !== "auth/cancelled-popup-request"
+      ) {
+        showNotice(err?.message || "로그인 중 오류가 발생했습니다.");
+      }
+    }
+  };
+
+  // Logout
+  const handleLogout = async () => {
+    try {
+      await logoutUser();
+      setAutoSaveToCloud(false);
+      localStorage.setItem("carelog_auto_save_cloud", "false");
+      showNotice("로그아웃되었습니다. 로컬에 저장된 내용은 계속 유지됩니다.");
+    } catch (err: any) {
+      showNotice("로그아웃 처리 중 오류가 발생했습니다.");
+    }
+  };
+
+  // Restore saved log from Cloud Logs Modal
+  const handleSelectSavedLog = (log: SavedLogItem) => {
+    if (log.date) setDate(log.date);
+    if (log.type) setType(log.type);
+    if (log.clientName) setName(log.clientName);
+    if (log.content) setResult(log.content);
+    setIsBatchMode(false);
+    showNotice(`${log.clientName}님의 ${log.date} ${log.type} 기록을 불러왔습니다.`);
+  };
 
   // Sync state to localStorage to handle and survive F5 manual/triggered refresh
   useEffect(() => {
@@ -220,7 +693,8 @@ export default function App() {
     localStorage.setItem("w_plan", plan);
     localStorage.setItem("carelog_is_batch_mode", String(isBatchMode));
     localStorage.setItem("carelog_batch_clients", JSON.stringify(batchClients));
-  }, [name, date, type, transit, hygiene, diet, health, program, others, programName, observation, support, reaction, plan, isBatchMode, batchClients]);
+    localStorage.setItem("carelog_auto_save_cloud", String(autoSaveToCloud));
+  }, [name, date, type, transit, hygiene, diet, health, program, others, programName, observation, support, reaction, plan, isBatchMode, batchClients, autoSaveToCloud]);
 
   const handleCancel = () => {
     if (abortController) {
@@ -298,34 +772,61 @@ export default function App() {
         setResult(resData.result);
         setIsLoading(false);
 
-        // Auto-save generated log to Firebase Firestore
-        try {
-          if (isBatchMode) {
-            const parsed = parseBatchResult(resData.result);
-            if (parsed.length > 0) {
-              await batchSaveLogsToFirestore(
-                parsed.map((p) => ({
-                  clientName: p.name,
+        // Auto-save generated log to Firebase Firestore if autoSaveToCloud is enabled and user is authenticated
+        if (autoSaveToCloud && currentUser) {
+          try {
+            setCloudSyncStatus("saving");
+            let writeConfirmed = false;
+
+            if (isBatchMode) {
+              const parsed = parseBatchResult(resData.result);
+              if (parsed.length > 0) {
+                const savedCount = await batchSaveLogsToFirestore(
+                  parsed.map((p) => ({
+                    clientName: p.name,
+                    date,
+                    type,
+                    content: p.content,
+                  }))
+                );
+                if (savedCount > 0) {
+                  writeConfirmed = true;
+                }
+              }
+              // Auto sync batch clients preset to user-isolated cloud storage
+              await saveBatchClientsToCloud(batchClients);
+            } else {
+              if (name && resData.result) {
+                const docId = await saveLogToFirestore({
+                  clientName: name,
                   date,
                   type,
-                  content: p.content,
-                }))
-              );
+                  content: resData.result,
+                });
+                if (docId) {
+                  writeConfirmed = true;
+                }
+              }
             }
-            // Auto sync batch clients preset to cloud
-            saveBatchClientsToCloud(batchClients);
-          } else {
-            if (name && resData.result) {
-              await saveLogToFirestore({
-                clientName: name,
-                date,
-                type,
-                content: resData.result,
-              });
+
+            if (writeConfirmed) {
+              setCloudSyncStatus("saved");
+              setTimeout(() => {
+                setCloudSyncStatus((prev) => (prev === "saved" ? "idle" : prev));
+              }, 2500);
+            } else {
+              setCloudSyncStatus("error");
+              setTimeout(() => {
+                setCloudSyncStatus((prev) => (prev === "error" ? "idle" : prev));
+              }, 3000);
             }
+          } catch (cloudErr) {
+            console.warn("Firebase auto-save notice:", cloudErr);
+            setCloudSyncStatus("error");
+            setTimeout(() => {
+              setCloudSyncStatus((prev) => (prev === "error" ? "idle" : prev));
+            }, 3000);
           }
-        } catch (cloudErr) {
-          console.error("Firebase auto-save error:", cloudErr);
         }
       }, 350);
     } catch (err: any) {
@@ -444,31 +945,32 @@ export default function App() {
   const parsedLogs = isBatchMode ? parseBatchResult(result) : [];
 
   return (
-    <div className="min-h-screen bg-[#F8F9FA] text-[#212529] font-sans p-4 md:p-8">
-      <div className="max-w-4xl mx-auto">
+    <div className="min-h-screen bg-[#F8F9FA] text-[#212529] font-sans p-4 sm:p-6 lg:p-8">
+      <div className="w-full max-w-xl lg:max-w-7xl mx-auto">
         {/* Header */}
-        <header className="mb-8 flex flex-col sm:flex-row sm:items-center sm:justify-between text-center sm:text-left gap-4">
-          <div>
-            <div className="flex items-center justify-center sm:justify-start gap-3 mb-2">
-              <div className="relative w-12 h-12 flex items-center justify-center flex-shrink-0 bg-white rounded-xl shadow-md transition-all duration-300 select-none hover:scale-105 overflow-hidden">
-                <img
-                  src={carelogClLogo}
-                  alt="CareLog Logo"
-                  className="w-full h-full object-cover scale-[1.02]"
-                  style={{ imageRendering: "-webkit-optimize-contrast" }}
-                  referrerPolicy="no-referrer"
-                />
-              </div>
-              <h1 className="text-2xl font-bold tracking-tight text-gray-900">
-                CareLog
-              </h1>
+        <header className="mb-6 lg:mb-8 flex flex-col items-center justify-center text-center gap-3">
+          <div className="flex items-center justify-center gap-3">
+            <div className="relative w-11 h-11 sm:w-12 sm:h-12 flex items-center justify-center flex-shrink-0 bg-white rounded-xl shadow-md transition-all duration-300 select-none hover:scale-105 overflow-hidden">
+              <img
+                src={carelogClLogo}
+                alt="CareLog Logo"
+                className="w-full h-full object-cover scale-[1.02]"
+                style={{ imageRendering: "-webkit-optimize-contrast" }}
+                referrerPolicy="no-referrer"
+              />
             </div>
-            <p className="text-gray-500 text-sm">
-              간단한 메모를 전문적인 복지 기록으로 변환해 드립니다.
-            </p>
+            <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-gray-900 inline-flex items-center gap-2">
+              CareLog
+              <span className="text-[11px] sm:text-xs font-semibold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full border border-blue-200/60 leading-none">
+                v1.0
+              </span>
+            </h1>
           </div>
+          <p className="text-gray-500 text-xs sm:text-sm">
+            간단한 메모를 전문적인 복지 기록으로 변환해 드립니다.
+          </p>
 
-          <div className="flex items-center justify-center sm:justify-end gap-2 flex-wrap">
+          <div className="flex items-center justify-center gap-2 flex-wrap pt-1">
             <button
               type="button"
               onClick={() => setShowCloudModal(true)}
@@ -482,6 +984,38 @@ export default function App() {
                 </span>
               )}
             </button>
+
+            {currentUser ? (
+              <div className="flex items-center gap-1.5 bg-white pl-2.5 pr-1.5 py-1 rounded-xl border border-gray-200 shadow-xs text-xs text-gray-700">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+                <span className="max-w-[130px] truncate font-semibold text-gray-800">
+                  {currentUser.displayName || currentUser.email?.split("@")[0]}님
+                </span>
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  className="p-1 hover:bg-gray-100 rounded-lg text-gray-400 hover:text-red-600 transition-colors"
+                  title="로그아웃"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={handleGoogleLogin}
+                className="flex items-center gap-1.5 px-3 py-2 bg-white hover:bg-gray-50 text-gray-700 text-xs font-semibold rounded-xl border border-gray-200 hover:border-gray-300 shadow-xs transition-all duration-200 active:scale-95 whitespace-nowrap"
+                title="Google 계정으로 로그인하여 클라우드 자동저장 사용"
+              >
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24">
+                  <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                  <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                  <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+                  <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+                </svg>
+                <span>Google 로그인</span>
+              </button>
+            )}
 
             <button
               type="button"
@@ -499,6 +1033,30 @@ export default function App() {
           </div>
         </header>
 
+        {/* Global Feedback Notification Toast */}
+        <AnimatePresence>
+          {notificationMessage && (
+            <motion.div
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              className="mb-4 max-w-xl lg:max-w-2xl mx-auto bg-gray-900 text-white text-xs font-medium py-2.5 px-4 rounded-xl shadow-lg flex items-center justify-between gap-3 z-40 border border-gray-800"
+            >
+              <div className="flex items-center gap-2">
+                <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>{notificationMessage}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setNotificationMessage(null)}
+                className="text-gray-400 hover:text-white text-xs px-1.5 py-0.5"
+              >
+                닫기
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* API Key Settings Panel */}
         <AnimatePresence>
           {showSettings && (
@@ -506,7 +1064,7 @@ export default function App() {
               initial={{ opacity: 0, height: 0, marginBottom: 0 }}
               animate={{ opacity: 1, height: "auto", marginBottom: 24 }}
               exit={{ opacity: 0, height: 0, marginBottom: 0 }}
-              className="overflow-hidden bg-white rounded-2xl border border-gray-105 shadow-sm"
+              className="overflow-hidden bg-white rounded-2xl border border-gray-100 shadow-sm max-w-xl lg:max-w-4xl mx-auto"
             >
               <div className="p-5 border-b border-gray-50 flex items-center justify-between">
                 <div className="flex items-center gap-2 text-gray-800">
@@ -615,12 +1173,12 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        <div className="grid md:grid-cols-2 gap-8">
-          {/* Input Section */}
+        <div className="flex flex-col lg:flex-row lg:items-start lg:justify-center gap-6 lg:gap-8">
+          {/* Input Section (Always keeps stable, consistent proportions) */}
           <motion.div 
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
-            className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6"
+            className="w-full lg:w-[540px] xl:w-[560px] lg:shrink-0 bg-white rounded-2xl shadow-sm border border-gray-100 p-5 sm:p-6"
           >
             <form onSubmit={handleSubmit} className="space-y-5">
               <div className="flex items-center justify-between mb-4 pb-4 border-b border-gray-100">
@@ -658,23 +1216,20 @@ export default function App() {
               {isBatchMode ? (
                 <>
                   {/* Common Selection Grid for Date and LogType */}
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="space-y-1.5">
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <div className="space-y-1">
                       <label className="text-xs font-semibold flex items-center gap-1.5 text-gray-600">
                         <Calendar className={`w-3.5 h-3.5 ${type === "생활일지" ? "text-blue-500" : "text-purple-500"} transition-colors`} /> 날짜
                       </label>
                       <input
                         type="date"
                         value={date}
-                        onChange={(e) => {
-                          setDate(e.target.value);
-                          localStorage.setItem("w_date_manually_changed", "true");
-                        }}
-                        className={`w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:ring-2 ${type === "생활일지" ? "focus:ring-blue-500" : "focus:ring-purple-500"} focus:border-transparent outline-none transition-all`}
+                        onChange={(e) => handleDateChangeRequest(e.target.value)}
+                        className={`w-full h-10 px-3 bg-gray-50 border border-gray-200 rounded-xl text-xs sm:text-sm font-medium leading-normal focus:ring-2 ${type === "생활일지" ? "focus:ring-blue-500" : "focus:ring-purple-500"} focus:border-transparent outline-none transition-all`}
                       />
                     </div>
 
-                    <div className="space-y-1.5">
+                    <div className="space-y-1">
                       <label className="text-xs font-semibold flex items-center gap-1.5 text-gray-600">
                         <FileText className={`w-3.5 h-3.5 ${type === "생활일지" ? "text-blue-500" : "text-purple-500"} transition-colors`} /> 기록 유형
                       </label>
@@ -682,12 +1237,12 @@ export default function App() {
                         <select
                           value={type}
                           onChange={(e) => setType(e.target.value as LogType)}
-                          className={`w-full appearance-none px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:ring-2 ${type === "생활일지" ? "focus:ring-blue-500" : "focus:ring-purple-500"} focus:border-transparent outline-none transition-all cursor-pointer pr-10`}
+                          className={`w-full h-10 appearance-none px-3 bg-gray-50 border border-gray-200 rounded-xl text-xs sm:text-sm font-medium leading-normal focus:ring-2 ${type === "생활일지" ? "focus:ring-blue-500" : "focus:ring-purple-500"} focus:border-transparent outline-none transition-all cursor-pointer pr-9`}
                         >
                           <option value="생활일지">생활일지</option>
                           <option value="프로그램일지">프로그램일지</option>
                         </select>
-                        <ChevronDown className="absolute right-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+                        <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
                       </div>
                     </div>
                   </div>
@@ -702,8 +1257,8 @@ export default function App() {
                       <span className="text-[10px] text-gray-400 font-medium">이름이 입력된 대상만 일지가 생성됩니다.</span>
                     </div>
 
-                    {/* Quick Selection Slider Grid with Progress */}
-                    <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 bg-gray-200/40 p-2 rounded-xl">
+                    {/* Quick Selection Slider Grid with Progress - Always fixed 3 cols */}
+                    <div className="grid grid-cols-3 gap-2 bg-gray-200/40 p-2 rounded-xl">
                       {batchClients.map((client, idx) => {
                         const filled = getFilledCount(client, type);
                         const total = type === "생활일지" ? 6 : 5;
@@ -714,31 +1269,31 @@ export default function App() {
                             key={idx}
                             type="button"
                             onClick={() => setActiveEditIndex(idx)}
-                            className={`py-2 px-1 text-xs font-bold rounded-lg transition-all border flex flex-col items-center justify-center relative ${
+                            className={`py-1.5 px-2 text-xs font-bold rounded-lg transition-all border flex items-center justify-center gap-1.5 relative shadow-2xs whitespace-nowrap ${
                               isSelected
                                 ? type === "생활일지"
-                                  ? "bg-blue-600 border-blue-600 text-white shadow-xs"
-                                  : "bg-purple-600 border-purple-600 text-white shadow-xs"
+                                ? "bg-blue-600 border-blue-600 text-white shadow-xs"
+                                : "bg-purple-600 border-purple-600 text-white shadow-xs"
                                 : isNameEntered
-                                  ? "bg-white border-gray-200 text-gray-800 hover:bg-gray-100"
-                                  : "bg-gray-100/30 border-dashed border-gray-200 text-gray-400 hover:bg-gray-50"
+                                  ? "bg-white border-gray-200 text-gray-800 hover:bg-gray-100 hover:border-gray-300"
+                                  : "bg-gray-100/40 border-dashed border-gray-200 text-gray-400 hover:bg-gray-50 hover:border-gray-300"
                             }`}
                           >
-                            <span className="text-[9px] opacity-75">#{idx + 1}</span>
-                            <span className="truncate max-w-full text-[11px] leading-tight mt-0.5 font-extrabold">
+                            <span className="text-[10px] opacity-75 font-semibold shrink-0">#{idx + 1}</span>
+                            <span className="truncate text-xs font-extrabold max-w-[65px] sm:max-w-none">
                               {client.name.trim() || "미등록"}
                             </span>
-                            {isNameEntered && (
-                              <span className={`text-[8px] px-1 mt-1 rounded-full ${
-                                isSelected 
-                                  ? "bg-white/20 text-white" 
-                                  : filled === total
+                            <span className={`text-[9px] px-1 py-0.5 font-bold rounded shrink-0 ${
+                              isSelected 
+                                ? "bg-white/20 text-white" 
+                                : isNameEntered
+                                  ? filled === total
                                     ? "bg-emerald-100 text-emerald-800"
                                     : "bg-gray-100 text-gray-600"
-                              }`}>
-                                {filled}/{total}
-                              </span>
-                            )}
+                                  : "bg-gray-200/60 text-gray-400"
+                            }`}>
+                              {filled}/{total}
+                            </span>
                           </button>
                         );
                       })}
@@ -810,29 +1365,27 @@ export default function App() {
                       )}
 
                       {/* Detailed Inputs per Active Client */}
-                      <div className="pt-3 border-t border-gray-150 space-y-3">
+                      <div className="pt-3 border-t border-gray-150 space-y-4">
                         {type === "생활일지" ? (
                           <>
                             {/* 입퇴소 및 송영 */}
-                            <div className="space-y-1">
-                              <div className="flex items-center justify-between">
-                                <label className="text-xs font-bold text-blue-600">입퇴소 및 송영</label>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    const val = batchClients[activeEditIndex]?.transit || "";
-                                    const updated = batchClients.map(c => ({ ...c, transit: val }));
-                                    setBatchClients(updated);
-                                  }}
-                                  className="text-[9px] text-gray-400 hover:text-blue-600 transition-colors flex items-center gap-0.5 font-bold"
-                                  title="현재 입력한 내용을 모든 이용인에게 동일하게 복사합니다."
-                                >
-                                  <Copy className="w-2.5 h-2.5" />
-                                  일괄 적용
-                                </button>
-                              </div>
-                              <HangulInput
-                                type="text"
+                            <div className="space-y-1.5">
+                              <CategoryHeaderWithKeywords
+                                label="입퇴소 및 송영"
+                                categoryKey="batch_transit"
+                                groups={LIVING_LOG_KEYWORD_GROUPS.transit}
+                                isOpen={openKeywordCategory === "batch_transit"}
+                                onToggle={() => toggleKeywordCategory("batch_transit")}
+                                onSelectKeyword={(kw) => handleBatchKeywordAppend("transit", kw)}
+                                badgeColor="blue"
+                                onCopyAll={() => {
+                                  const val = batchClients[activeEditIndex]?.transit || "";
+                                  const updated = batchClients.map(c => ({ ...c, transit: val }));
+                                  setBatchClients(updated);
+                                }}
+                              />
+                              <HangulTextarea
+                                rows={2}
                                 lang="ko"
                                 placeholder="예: 송영차량 이용, 보호자 직접 등원"
                                 value={batchClients[activeEditIndex]?.transit || ""}
@@ -841,564 +1394,572 @@ export default function App() {
                                   updated[activeEditIndex].transit = e.target.value;
                                   setBatchClients(updated);
                                 }}
-                                className="w-full px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs outline-none focus:ring-1 focus:ring-blue-400"
+                                className="w-full min-h-[58px] p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs sm:text-sm leading-relaxed outline-none focus:ring-2 focus:ring-blue-400 focus:bg-white transition-all overflow-y-auto resize-y"
                               />
                             </div>
 
                             {/* 위생 및 청결 */}
-                            <div className="space-y-1">
-                              <div className="flex items-center justify-between">
-                                <label className="text-xs font-bold text-blue-600">위생 및 청결</label>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    const val = batchClients[activeEditIndex]?.hygiene || "";
-                                    const updated = batchClients.map(c => ({ ...c, hygiene: val }));
-                                    setBatchClients(updated);
-                                  }}
-                                  className="text-[9px] text-gray-400 hover:text-blue-600 transition-colors flex items-center gap-0.5 font-bold"
-                                  title="현재 입력한 내용을 모든 이용인에게 동일하게 복사합니다."
-                                >
-                                  <Copy className="w-2.5 h-2.5" />
-                                  일괄 적용
-                                </button>
-                              </div>
-                              <HangulInput
-                                type="text"
+                            <div className="space-y-1.5">
+                              <CategoryHeaderWithKeywords
+                                label="위생 및 청결"
+                                categoryKey="batch_hygiene"
+                                groups={LIVING_LOG_KEYWORD_GROUPS.hygiene}
+                                isOpen={openKeywordCategory === "batch_hygiene"}
+                                onToggle={() => toggleKeywordCategory("batch_hygiene")}
+                                onSelectKeyword={(kw) => handleBatchKeywordAppend("hygiene", kw)}
+                                badgeColor="blue"
+                                onCopyAll={() => {
+                                  const val = batchClients[activeEditIndex]?.hygiene || "";
+                                  const updated = batchClients.map(c => ({ ...c, hygiene: val }));
+                                  setBatchClients(updated);
+                                }}
+                              />
+                              <HangulTextarea
+                                rows={2}
                                 lang="ko"
-                                placeholder="예: 스스로 손씻기 수행, 세수 지원"
+                                placeholder="예: 스스로 손씻기 수행, 세수 지원, 환의 도움"
                                 value={batchClients[activeEditIndex]?.hygiene || ""}
                                 onChange={(e: any) => {
                                   const updated = [...batchClients];
                                   updated[activeEditIndex].hygiene = e.target.value;
                                   setBatchClients(updated);
                                 }}
-                                className="w-full px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs outline-none focus:ring-1 focus:ring-blue-400"
+                                className="w-full min-h-[58px] p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs sm:text-sm leading-relaxed outline-none focus:ring-2 focus:ring-blue-400 focus:bg-white transition-all overflow-y-auto resize-y"
                               />
                             </div>
 
                             {/* 식생활 */}
-                            <div className="space-y-1">
-                              <div className="flex items-center justify-between">
-                                <label className="text-xs font-bold text-blue-600">식생활</label>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    const val = batchClients[activeEditIndex]?.diet || "";
-                                    const updated = batchClients.map(c => ({ ...c, diet: val }));
-                                    setBatchClients(updated);
-                                  }}
-                                  className="text-[9px] text-gray-400 hover:text-blue-600 transition-colors flex items-center gap-0.5 font-bold"
-                                  title="현재 입력한 내용을 모든 이용인에게 동일하게 복사합니다."
-                                >
-                                  <Copy className="w-2.5 h-2.5" />
-                                  일괄 적용
-                                </button>
-                              </div>
-                              <HangulInput
-                                type="text"
+                            <div className="space-y-1.5">
+                              <CategoryHeaderWithKeywords
+                                label="식생활"
+                                categoryKey="batch_diet"
+                                groups={LIVING_LOG_KEYWORD_GROUPS.diet}
+                                isOpen={openKeywordCategory === "batch_diet"}
+                                onToggle={() => toggleKeywordCategory("batch_diet")}
+                                onSelectKeyword={(kw) => handleBatchKeywordAppend("diet", kw)}
+                                badgeColor="blue"
+                                onCopyAll={() => {
+                                  const val = batchClients[activeEditIndex]?.diet || "";
+                                  const updated = batchClients.map(c => ({ ...c, diet: val }));
+                                  setBatchClients(updated);
+                                }}
+                              />
+                              <HangulTextarea
+                                rows={2}
                                 lang="ko"
-                                placeholder="예: 전량 섭취, 생선 위주로 식사"
+                                placeholder="예: 전량 섭취, 생선 위주로 식사, 숟가락 사용 지원"
                                 value={batchClients[activeEditIndex]?.diet || ""}
                                 onChange={(e: any) => {
                                   const updated = [...batchClients];
                                   updated[activeEditIndex].diet = e.target.value;
                                   setBatchClients(updated);
                                 }}
-                                className="w-full px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs outline-none focus:ring-1 focus:ring-blue-400"
+                                className="w-full min-h-[58px] p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs sm:text-sm leading-relaxed outline-none focus:ring-2 focus:ring-blue-400 focus:bg-white transition-all overflow-y-auto resize-y"
                               />
                             </div>
 
-                            {/* 건강관리 & 프로그램 Grid */}
-                            <div className="grid grid-cols-2 gap-3">
-                              <div className="space-y-1">
-                                <div className="flex items-center justify-between">
-                                  <label className="text-xs font-bold text-blue-600">건강관리</label>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      const val = batchClients[activeEditIndex]?.health || "";
-                                      const updated = batchClients.map(c => ({ ...c, health: val }));
-                                      setBatchClients(updated);
-                                    }}
-                                    className="text-[9px] text-gray-400 hover:text-blue-600 transition-colors flex items-center gap-0.5 font-bold"
-                                    title="현재 입력한 내용을 모든 이용인에게 동일하게 복사합니다."
-                                  >
-                                    <Copy className="w-2.5 h-2.5" />
-                                    일괄 적용
-                                  </button>
-                                </div>
-                                <HangulInput
-                                  type="text"
-                                  lang="ko"
-                                  placeholder="예: 양호함 / 체온: 정상"
-                                  value={batchClients[activeEditIndex]?.health || ""}
-                                  onChange={(e: any) => {
-                                    const updated = [...batchClients];
-                                    updated[activeEditIndex].health = e.target.value;
-                                    setBatchClients(updated);
-                                  }}
-                                  className="w-full px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs outline-none focus:ring-1 focus:ring-blue-400"
-                                />
-                              </div>
+                            {/* 건강관리 */}
+                            <div className="space-y-1.5">
+                              <CategoryHeaderWithKeywords
+                                label="건강관리"
+                                categoryKey="batch_health"
+                                groups={LIVING_LOG_KEYWORD_GROUPS.health}
+                                isOpen={openKeywordCategory === "batch_health"}
+                                onToggle={() => toggleKeywordCategory("batch_health")}
+                                onSelectKeyword={(kw) => handleBatchKeywordAppend("health", kw)}
+                                badgeColor="blue"
+                                onCopyAll={() => {
+                                  const val = batchClients[activeEditIndex]?.health || "";
+                                  const updated = batchClients.map(c => ({ ...c, health: val }));
+                                  setBatchClients(updated);
+                                }}
+                              />
+                              <HangulTextarea
+                                rows={2}
+                                lang="ko"
+                                placeholder="예: 양호함 / 체온: 36.5 정상, 투약 지원"
+                                value={batchClients[activeEditIndex]?.health || ""}
+                                onChange={(e: any) => {
+                                  const updated = [...batchClients];
+                                  updated[activeEditIndex].health = e.target.value;
+                                  setBatchClients(updated);
+                                }}
+                                className="w-full min-h-[58px] p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs sm:text-sm leading-relaxed outline-none focus:ring-2 focus:ring-blue-400 focus:bg-white transition-all overflow-y-auto resize-y"
+                              />
+                            </div>
 
-                              <div className="space-y-1">
-                                <div className="flex items-center justify-between">
-                                  <label className="text-xs font-bold text-blue-600">프로그램</label>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      const val = batchClients[activeEditIndex]?.program || "";
-                                      const updated = batchClients.map(c => ({ ...c, program: val }));
-                                      setBatchClients(updated);
-                                    }}
-                                    className="text-[9px] text-gray-400 hover:text-blue-600 transition-colors flex items-center gap-0.5 font-bold"
-                                    title="현재 입력한 내용을 모든 이용인에게 동일하게 복사합니다."
-                                  >
-                                    <Copy className="w-2.5 h-2.5" />
-                                    일괄 적용
-                                  </button>
-                                </div>
-                                <HangulInput
-                                  type="text"
-                                  lang="ko"
-                                  placeholder="예: 동화구연"
-                                  value={batchClients[activeEditIndex]?.program || ""}
-                                  onChange={(e: any) => {
-                                    const updated = [...batchClients];
-                                    updated[activeEditIndex].program = e.target.value;
-                                    setBatchClients(updated);
-                                  }}
-                                  className="w-full px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs outline-none focus:ring-1 focus:ring-blue-400"
-                                />
-                              </div>
+                            {/* 프로그램 */}
+                            <div className="space-y-1.5">
+                              <SimpleCategoryHeader
+                                label="프로그램"
+                                badgeText="직접 입력"
+                                badgeColor="blue"
+                                onCopyAll={() => {
+                                  const val = batchClients[activeEditIndex]?.program || "";
+                                  const updated = batchClients.map(c => ({ ...c, program: val }));
+                                  setBatchClients(updated);
+                                }}
+                              />
+                              <HangulTextarea
+                                rows={2}
+                                lang="ko"
+                                placeholder="예: 동화구연, 미술활동 참여"
+                                value={batchClients[activeEditIndex]?.program || ""}
+                                onChange={(e: any) => {
+                                  const updated = [...batchClients];
+                                  updated[activeEditIndex].program = e.target.value;
+                                  setBatchClients(updated);
+                                }}
+                                className="w-full min-h-[58px] p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs sm:text-sm leading-relaxed outline-none focus:ring-2 focus:ring-blue-400 focus:bg-white transition-all overflow-y-auto resize-y"
+                              />
                             </div>
 
                             {/* 기타사항 */}
-                            <div className="space-y-1">
-                              <div className="flex items-center justify-between">
-                                <label className="text-xs font-bold text-blue-600">기타사항</label>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    const val = batchClients[activeEditIndex]?.others || "";
-                                    const updated = batchClients.map(c => ({ ...c, others: val }));
-                                    setBatchClients(updated);
-                                  }}
-                                  className="text-[9px] text-gray-400 hover:text-blue-600 transition-colors flex items-center gap-0.5 font-bold"
-                                  title="현재 입력한 내용을 모든 이용인에게 동일하게 복사합니다."
-                                >
-                                  <Copy className="w-2.5 h-2.5" />
-                                  일괄 적용
-                                </button>
-                              </div>
-                              <HangulInput
-                                type="text"
+                            <div className="space-y-1.5">
+                              <CategoryHeaderWithKeywords
+                                label="기타사항"
+                                categoryKey="batch_others"
+                                groups={LIVING_LOG_KEYWORD_GROUPS.others}
+                                isOpen={openKeywordCategory === "batch_others"}
+                                onToggle={() => toggleKeywordCategory("batch_others")}
+                                onSelectKeyword={(kw) => handleBatchKeywordAppend("others", kw)}
+                                badgeColor="blue"
+                                onCopyAll={() => {
+                                  const val = batchClients[activeEditIndex]?.others || "";
+                                  const updated = batchClients.map(c => ({ ...c, others: val }));
+                                  setBatchClients(updated);
+                                }}
+                              />
+                              <HangulTextarea
+                                rows={3}
                                 lang="ko"
-                                placeholder="기타 특이사항 기재"
+                                placeholder="동료와의 상호작용, 기분 상태, 특이사항 기재"
                                 value={batchClients[activeEditIndex]?.others || ""}
                                 onChange={(e: any) => {
                                   const updated = [...batchClients];
                                   updated[activeEditIndex].others = e.target.value;
                                   setBatchClients(updated);
                                 }}
-                                className="w-full px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs outline-none focus:ring-1 focus:ring-blue-400"
+                                className="w-full min-h-[72px] p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs sm:text-sm leading-relaxed outline-none focus:ring-2 focus:ring-blue-400 focus:bg-white transition-all overflow-y-auto resize-y"
                               />
                             </div>
                           </>
                         ) : (
                           <>
                             {/* 프로그램명 */}
-                            <div className="space-y-1">
-                              <div className="flex items-center justify-between">
-                                <label className="text-xs font-bold text-purple-600">프로그램명</label>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    const val = batchClients[activeEditIndex]?.programName || "";
-                                    const updated = batchClients.map(c => ({ ...c, programName: val }));
-                                    setBatchClients(updated);
-                                  }}
-                                  className="text-[9px] text-gray-400 hover:text-purple-600 transition-colors flex items-center gap-0.5 font-bold"
-                                  title="현재 입력한 내용을 모든 이용인에게 동일하게 복사합니다."
-                                >
-                                  <Copy className="w-2.5 h-2.5" />
-                                  일괄 적용
-                                </button>
-                              </div>
-                              <HangulInput
-                                type="text"
+                            <div className="space-y-1.5">
+                              <SimpleCategoryHeader
+                                label="프로그램명"
+                                badgeText="직접 입력"
+                                badgeColor="purple"
+                                icon={<Palette className="w-3.5 h-3.5 text-purple-600 shrink-0" />}
+                                onCopyAll={() => {
+                                  const val = batchClients[activeEditIndex]?.programName || "";
+                                  const updated = batchClients.map(c => ({ ...c, programName: val }));
+                                  setBatchClients(updated);
+                                }}
+                              />
+                              <HangulTextarea
+                                rows={2}
                                 lang="ko"
-                                placeholder="프로그램 제목을 입력하세요"
+                                placeholder="프로그램 제목을 입력하세요 (예: 종이접기 교실, 신체활동)"
                                 value={batchClients[activeEditIndex]?.programName || ""}
                                 onChange={(e: any) => {
                                   const updated = [...batchClients];
                                   updated[activeEditIndex].programName = e.target.value;
                                   setBatchClients(updated);
                                 }}
-                                className="w-full px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs outline-none focus:ring-1 focus:ring-purple-400"
+                                className="w-full min-h-[54px] p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs sm:text-sm leading-relaxed outline-none focus:ring-2 focus:ring-purple-400 focus:bg-white transition-all overflow-y-auto resize-y"
                               />
                             </div>
 
                             {/* 관찰내용 */}
-                            <div className="space-y-1">
-                              <div className="flex items-center justify-between">
-                                <label className="text-xs font-bold text-purple-600">관찰내용</label>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    const val = batchClients[activeEditIndex]?.observation || "";
-                                    const updated = batchClients.map(c => ({ ...c, observation: val }));
-                                    setBatchClients(updated);
-                                  }}
-                                  className="text-[9px] text-gray-400 hover:text-purple-600 transition-colors flex items-center gap-0.5 font-bold"
-                                  title="현재 입력한 내용을 모든 이용인에게 동일하게 복사합니다."
-                                >
-                                  <Copy className="w-2.5 h-2.5" />
-                                  일괄 적용
-                                </button>
-                              </div>
+                            <div className="space-y-1.5">
+                              <CategoryHeaderWithKeywords
+                                label="관찰내용"
+                                categoryKey="batch_observation"
+                                groups={PROGRAM_LOG_KEYWORD_GROUPS.observation}
+                                isOpen={openKeywordCategory === "batch_observation"}
+                                onToggle={() => toggleKeywordCategory("batch_observation")}
+                                onSelectKeyword={(kw) => handleBatchKeywordAppend("observation", kw)}
+                                badgeColor="purple"
+                                onCopyAll={() => {
+                                  const val = batchClients[activeEditIndex]?.observation || "";
+                                  const updated = batchClients.map(c => ({ ...c, observation: val }));
+                                  setBatchClients(updated);
+                                }}
+                              />
                               <HangulTextarea
-                                rows={2}
+                                rows={4}
                                 lang="ko"
-                                placeholder="이용인의 실제 행동 중심 관찰 내용 기재"
+                                placeholder="이용인의 실제 참여 태도, 활동 과정, 행동 양상 등 관찰된 내용을 자유롭게 기재해 주세요."
                                 value={batchClients[activeEditIndex]?.observation || ""}
                                 onChange={(e: any) => {
                                   const updated = [...batchClients];
                                   updated[activeEditIndex].observation = e.target.value;
                                   setBatchClients(updated);
                                 }}
-                                className="w-full px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs outline-none focus:ring-1 focus:ring-purple-400 resize-none"
+                                className="w-full min-h-[96px] p-3 bg-gray-50 border border-gray-200 rounded-xl text-xs sm:text-sm leading-relaxed outline-none focus:ring-2 focus:ring-purple-400 focus:bg-white transition-all overflow-y-auto resize-y"
                               />
                             </div>
 
                             {/* 지원내용 */}
-                            <div className="space-y-1">
-                              <div className="flex items-center justify-between">
-                                <label className="text-xs font-bold text-purple-600">지원내용</label>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    const val = batchClients[activeEditIndex]?.support || "";
-                                    const updated = batchClients.map(c => ({ ...c, support: val }));
-                                    setBatchClients(updated);
-                                  }}
-                                  className="text-[9px] text-gray-400 hover:text-purple-600 transition-colors flex items-center gap-0.5 font-bold"
-                                  title="현재 입력한 내용을 모든 이용인에게 동일하게 복사합니다."
-                                >
-                                  <Copy className="w-2.5 h-2.5" />
-                                  일괄 적용
-                                </button>
-                              </div>
-                              <HangulInput
-                                type="text"
+                            <div className="space-y-1.5">
+                              <CategoryHeaderWithKeywords
+                                label="지원내용"
+                                categoryKey="batch_support"
+                                groups={PROGRAM_LOG_KEYWORD_GROUPS.support}
+                                isOpen={openKeywordCategory === "batch_support"}
+                                onToggle={() => toggleKeywordCategory("batch_support")}
+                                onSelectKeyword={(kw) => handleBatchKeywordAppend("support", kw)}
+                                badgeColor="purple"
+                                onCopyAll={() => {
+                                  const val = batchClients[activeEditIndex]?.support || "";
+                                  const updated = batchClients.map(c => ({ ...c, support: val }));
+                                  setBatchClients(updated);
+                                }}
+                              />
+                              <HangulTextarea
+                                rows={3}
                                 lang="ko"
-                                placeholder="직원의 개입이나 도움"
+                                placeholder="직원의 개입, 언어적 촉구, 신체적 보조 등 지원 사항 기재"
                                 value={batchClients[activeEditIndex]?.support || ""}
                                 onChange={(e: any) => {
                                   const updated = [...batchClients];
                                   updated[activeEditIndex].support = e.target.value;
                                   setBatchClients(updated);
                                 }}
-                                className="w-full px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs outline-none focus:ring-1 focus:ring-purple-400"
+                                className="w-full min-h-[72px] p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs sm:text-sm leading-relaxed outline-none focus:ring-2 focus:ring-purple-400 focus:bg-white transition-all overflow-y-auto resize-y"
                               />
                             </div>
 
-                            {/* 반응 및 계획 Grid */}
-                            <div className="grid grid-cols-2 gap-3">
-                              <div className="space-y-1">
-                                <div className="flex items-center justify-between">
-                                  <label className="text-xs font-bold text-purple-600">의미 있는 반응</label>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      const val = batchClients[activeEditIndex]?.reaction || "";
-                                      const updated = batchClients.map(c => ({ ...c, reaction: val }));
-                                      setBatchClients(updated);
-                                    }}
-                                    className="text-[9px] text-gray-400 hover:text-purple-600 transition-colors flex items-center gap-0.5 font-bold"
-                                    title="현재 입력한 내용을 모든 이용인에게 동일하게 복사합니다."
-                                  >
-                                    <Copy className="w-2.5 h-2.5" />
-                                    일괄 적용
-                                  </button>
-                                </div>
-                                <HangulInput
-                                  type="text"
-                                  lang="ko"
-                                  placeholder="작은 변화나 반응"
-                                  value={batchClients[activeEditIndex]?.reaction || ""}
-                                  onChange={(e: any) => {
-                                    const updated = [...batchClients];
-                                    updated[activeEditIndex].reaction = e.target.value;
-                                    setBatchClients(updated);
-                                  }}
-                                  className="w-full px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs outline-none focus:ring-1 focus:ring-purple-400"
-                                />
-                              </div>
+                            {/* 의미 있는 반응 */}
+                            <div className="space-y-1.5">
+                              <CategoryHeaderWithKeywords
+                                label="의미 있는 반응"
+                                categoryKey="batch_reaction"
+                                groups={PROGRAM_LOG_KEYWORD_GROUPS.reaction}
+                                isOpen={openKeywordCategory === "batch_reaction"}
+                                onToggle={() => toggleKeywordCategory("batch_reaction")}
+                                onSelectKeyword={(kw) => handleBatchKeywordAppend("reaction", kw)}
+                                badgeColor="purple"
+                                onCopyAll={() => {
+                                  const val = batchClients[activeEditIndex]?.reaction || "";
+                                  const updated = batchClients.map(c => ({ ...c, reaction: val }));
+                                  setBatchClients(updated);
+                                }}
+                              />
+                              <HangulTextarea
+                                rows={3}
+                                lang="ko"
+                                placeholder="성취감 표현, 웃음, 작은 긍정적 변화나 반응"
+                                value={batchClients[activeEditIndex]?.reaction || ""}
+                                onChange={(e: any) => {
+                                  const updated = [...batchClients];
+                                  updated[activeEditIndex].reaction = e.target.value;
+                                  setBatchClients(updated);
+                                }}
+                                className="w-full min-h-[72px] p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs sm:text-sm leading-relaxed outline-none focus:ring-2 focus:ring-purple-400 focus:bg-white transition-all overflow-y-auto resize-y"
+                              />
+                            </div>
 
-                              <div className="space-y-1">
-                                <div className="flex items-center justify-between">
-                                  <label className="text-xs font-bold text-purple-600">차주 지원계획</label>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      const val = batchClients[activeEditIndex]?.plan || "";
-                                      const updated = batchClients.map(c => ({ ...c, plan: val }));
-                                      setBatchClients(updated);
-                                    }}
-                                    className="text-[9px] text-gray-400 hover:text-purple-600 transition-colors flex items-center gap-0.5 font-bold"
-                                    title="현재 입력한 내용을 모든 이용인에게 동일하게 복사합니다."
-                                  >
-                                    <Copy className="w-2.5 h-2.5" />
-                                    일괄 적용
-                                  </button>
-                                </div>
-                                <HangulInput
-                                  type="text"
-                                  lang="ko"
-                                  placeholder="실천 가능한 계획"
-                                  value={batchClients[activeEditIndex]?.plan || ""}
-                                  onChange={(e: any) => {
-                                    const updated = [...batchClients];
-                                    updated[activeEditIndex].plan = e.target.value;
-                                    setBatchClients(updated);
-                                  }}
-                                  className="w-full px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs outline-none focus:ring-1 focus:ring-purple-400"
-                                />
-                              </div>
+                            {/* 차주 지원계획 */}
+                            <div className="space-y-1.5">
+                              <CategoryHeaderWithKeywords
+                                label="차주 지원계획"
+                                categoryKey="batch_plan"
+                                groups={PROGRAM_LOG_KEYWORD_GROUPS.plan}
+                                isOpen={openKeywordCategory === "batch_plan"}
+                                onToggle={() => toggleKeywordCategory("batch_plan")}
+                                onSelectKeyword={(kw) => handleBatchKeywordAppend("plan", kw)}
+                                badgeColor="purple"
+                                onCopyAll={() => {
+                                  const val = batchClients[activeEditIndex]?.plan || "";
+                                  const updated = batchClients.map(c => ({ ...c, plan: val }));
+                                  setBatchClients(updated);
+                                }}
+                              />
+                              <HangulTextarea
+                                rows={3}
+                                lang="ko"
+                                placeholder="난이도 조절, 개별 맞춤 도구 제공 등 다음 실천 계획"
+                                value={batchClients[activeEditIndex]?.plan || ""}
+                                onChange={(e: any) => {
+                                  const updated = [...batchClients];
+                                  updated[activeEditIndex].plan = e.target.value;
+                                  setBatchClients(updated);
+                                }}
+                                className="w-full min-h-[72px] p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs sm:text-sm leading-relaxed outline-none focus:ring-2 focus:ring-purple-400 focus:bg-white transition-all overflow-y-auto resize-y"
+                              />
                             </div>
                           </>
                         )}
                       </div>
                     </div>
-
-                    {/* Navigation Bar */}
-                    <div className="flex items-center justify-between pt-1">
-                      <button
-                        type="button"
-                        disabled={activeEditIndex === 0}
-                        onClick={() => setActiveEditIndex(prev => prev - 1)}
-                        className={`flex items-center gap-1 py-1.5 px-3 rounded-lg text-xs font-bold border transition-colors ${
-                          activeEditIndex === 0
-                            ? "border-gray-150 text-gray-300 cursor-not-allowed bg-gray-50/50"
-                            : "border-gray-200 text-gray-600 hover:bg-gray-100"
-                        }`}
-                      >
-                        <ChevronLeft className="w-3.5 h-3.5" />
-                        이전 이용인
-                      </button>
-
-                      <div className="text-xs font-bold text-gray-500 bg-gray-100 px-3 py-1 rounded-full">
-                        {activeEditIndex + 1} / 6 번째 이용인 입력 중
-                      </div>
-
-                      <button
-                        type="button"
-                        disabled={activeEditIndex === 5}
-                        onClick={() => setActiveEditIndex(prev => prev + 1)}
-                        className={`flex items-center gap-1 py-1.5 px-3 rounded-lg text-xs font-bold border transition-colors ${
-                          activeEditIndex === 5
-                            ? "border-gray-150 text-gray-300 cursor-not-allowed bg-gray-50/50"
-                            : "border-gray-200 text-gray-600 hover:bg-gray-100"
-                        }`}
-                      >
-                        다음 이용인
-                        <ChevronRight className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-
-                    {/* Tip Card */}
-                    <div className="p-3 bg-blue-50/30 rounded-xl border border-blue-100/50 text-[11px] text-blue-700/90 leading-relaxed space-y-1">
-                      <p className="font-bold flex items-center gap-1">💡 일괄 복사 팁 (매우 빠른 입력 방법):</p>
-                      <p>
-                        첫 번째 이용인에게 내용을 모두 적은 뒤, 각 항목 우측 상단의 <span className="font-extrabold text-blue-600">"일괄 적용"</span> 버튼을 누르면 다른 5명의 이용인에게 동일한 내용이 즉시 입력됩니다. 복사 후에 개별적으로 다른 내용을 가진 이용인의 항목만 수정하면 아주 편리하게 입력할 수 있습니다.
-                      </p>
-                    </div>
                   </div>
                 </>
               ) : (
                 <>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="space-y-1.5">
-                      <label className="text-xs font-semibold flex items-center gap-1.5 text-gray-600">
-                        <User className={`w-3.5 h-3.5 ${type === "생활일지" ? "text-blue-500" : "text-purple-500"} transition-colors`} /> 이름
-                      </label>
-                      <HangulInput
-                        type="text"
-                        lang="ko"
-                        autoCapitalize="none"
-                        autoCorrect="off"
-                        spellCheck={false}
-                        placeholder="이용인 성함 (예: 김OO)"
-                        value={name}
-                        onChange={(e: any) => setName(e.target.value)}
-                        className={`w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:ring-2 ${type === "생활일지" ? "focus:ring-blue-500" : "focus:ring-purple-500"} focus:border-transparent outline-none transition-all placeholder:text-gray-400`}
-                      />
-                    </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-semibold flex items-center gap-1.5 text-gray-600">
+                      <User className={`w-3.5 h-3.5 ${type === "생활일지" ? "text-blue-500" : "text-purple-500"} transition-colors`} /> 이름
+                    </label>
+                    <HangulInput
+                      type="text"
+                      lang="ko"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      placeholder="이용인 성함 (예: 김OO)"
+                      value={name}
+                      onChange={(e: any) => setName(e.target.value)}
+                      className={`w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:ring-2 ${type === "생활일지" ? "focus:ring-blue-500" : "focus:ring-purple-500"} focus:border-transparent outline-none transition-all placeholder:text-gray-400`}
+                    />
+                  </div>
 
-                    <div className="space-y-1.5">
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <div className="space-y-1">
                       <label className="text-xs font-semibold flex items-center gap-1.5 text-gray-600">
                         <Calendar className={`w-3.5 h-3.5 ${type === "생활일지" ? "text-blue-500" : "text-purple-500"} transition-colors`} /> 날짜
                       </label>
                       <input
                         type="date"
                         value={date}
-                        onChange={(e) => {
-                          setDate(e.target.value);
-                          localStorage.setItem("w_date_manually_changed", "true");
-                        }}
-                        className={`w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:ring-2 ${type === "생활일지" ? "focus:ring-blue-500" : "focus:ring-purple-500"} focus:border-transparent outline-none transition-all`}
+                        onChange={(e) => handleDateChangeRequest(e.target.value)}
+                        className={`w-full h-10 px-3 bg-gray-50 border border-gray-200 rounded-xl text-xs sm:text-sm font-medium leading-normal focus:ring-2 ${type === "생활일지" ? "focus:ring-blue-500" : "focus:ring-purple-500"} focus:border-transparent outline-none transition-all`}
                       />
                     </div>
-                  </div>
 
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-semibold flex items-center gap-1.5 text-gray-600">
-                      <FileText className={`w-3.5 h-3.5 ${type === "생활일지" ? "text-blue-500" : "text-purple-500"} transition-colors`} /> 기록 유형
-                    </label>
-                    <div className="relative">
-                      <select
-                        value={type}
-                        onChange={(e) => setType(e.target.value as LogType)}
-                        className={`w-full appearance-none px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:ring-2 ${type === "생활일지" ? "focus:ring-blue-500" : "focus:ring-purple-500"} focus:border-transparent outline-none transition-all cursor-pointer pr-10`}
-                      >
-                        <option value="생활일지">생활일지</option>
-                        <option value="프로그램일지">프로그램일지</option>
-                      </select>
-                      <ChevronDown className="absolute right-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+                    <div className="space-y-1">
+                      <label className="text-xs font-semibold flex items-center gap-1.5 text-gray-600">
+                        <FileText className={`w-3.5 h-3.5 ${type === "생활일지" ? "text-blue-500" : "text-purple-500"} transition-colors`} /> 기록 유형
+                      </label>
+                      <div className="relative">
+                        <select
+                          value={type}
+                          onChange={(e) => setType(e.target.value as LogType)}
+                          className={`w-full h-10 appearance-none px-3 bg-gray-50 border border-gray-200 rounded-xl text-xs sm:text-sm font-medium leading-normal focus:ring-2 ${type === "생활일지" ? "focus:ring-blue-500" : "focus:ring-purple-500"} focus:border-transparent outline-none transition-all cursor-pointer pr-9`}
+                        >
+                          <option value="생활일지">생활일지</option>
+                          <option value="프로그램일지">프로그램일지</option>
+                        </select>
+                        <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+                      </div>
                     </div>
                   </div>
 
                   {type === "생활일지" ? (
                     <div className="space-y-4 pt-2 border-t border-gray-100">
-                      <div className="space-y-2">
-                        <label className="text-xs font-bold text-blue-600 uppercase tracking-wider">입퇴소 및 송영</label>
-                        <HangulInput
-                          type="text"
+                      <div className="space-y-1.5">
+                        <CategoryHeaderWithKeywords
+                          label="입퇴소 및 송영"
+                          categoryKey="single_transit"
+                          groups={LIVING_LOG_KEYWORD_GROUPS.transit}
+                          isOpen={openKeywordCategory === "single_transit"}
+                          onToggle={() => toggleKeywordCategory("single_transit")}
+                          onSelectKeyword={(kw) => handleSingleKeywordAppend("transit", kw)}
+                          badgeColor="blue"
+                        />
+                        <HangulTextarea
+                          rows={2}
                           lang="ko"
                           placeholder="예: 송영차량 이용, 보호자 직접 등원"
                           value={transit}
                           onChange={(e: any) => setTransit(e.target.value)}
-                          className="w-full px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-sm outline-none focus:ring-1 focus:ring-blue-400"
+                          className="w-full min-h-[58px] p-3 bg-gray-50 border border-gray-200 rounded-xl text-sm leading-relaxed outline-none focus:ring-2 focus:ring-blue-400 focus:bg-white transition-all overflow-y-auto resize-y"
                         />
                       </div>
-                      <div className="space-y-2">
-                        <label className="text-xs font-bold text-blue-600 uppercase tracking-wider">위생 및 청결</label>
-                        <HangulInput
-                          type="text"
+                      <div className="space-y-1.5">
+                        <CategoryHeaderWithKeywords
+                          label="위생 및 청결"
+                          categoryKey="single_hygiene"
+                          groups={LIVING_LOG_KEYWORD_GROUPS.hygiene}
+                          isOpen={openKeywordCategory === "single_hygiene"}
+                          onToggle={() => toggleKeywordCategory("single_hygiene")}
+                          onSelectKeyword={(kw) => handleSingleKeywordAppend("hygiene", kw)}
+                          badgeColor="blue"
+                        />
+                        <HangulTextarea
+                          rows={2}
                           lang="ko"
-                          placeholder="예: 스스로 손씻기 수행, 세수 지원"
+                          placeholder="예: 스스로 손씻기 수행, 세수 지원, 환의 도움"
                           value={hygiene}
                           onChange={(e: any) => setHygiene(e.target.value)}
-                          className="w-full px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-sm outline-none focus:ring-1 focus:ring-blue-400"
+                          className="w-full min-h-[58px] p-3 bg-gray-50 border border-gray-200 rounded-xl text-sm leading-relaxed outline-none focus:ring-2 focus:ring-blue-400 focus:bg-white transition-all overflow-y-auto resize-y"
                         />
                       </div>
-                      <div className="space-y-2">
-                        <label className="text-xs font-bold text-blue-600 uppercase tracking-wider">식생활</label>
-                        <HangulInput
-                          type="text"
+                      <div className="space-y-1.5">
+                        <CategoryHeaderWithKeywords
+                          label="식생활"
+                          categoryKey="single_diet"
+                          groups={LIVING_LOG_KEYWORD_GROUPS.diet}
+                          isOpen={openKeywordCategory === "single_diet"}
+                          onToggle={() => toggleKeywordCategory("single_diet")}
+                          onSelectKeyword={(kw) => handleSingleKeywordAppend("diet", kw)}
+                          badgeColor="blue"
+                        />
+                        <HangulTextarea
+                          rows={2}
                           lang="ko"
-                          placeholder="예: 전량 섭취, 생선 위주로 식사"
+                          placeholder="예: 전량 섭취, 생선 위주로 식사, 숟가락 사용 보조"
                           value={diet}
                           onChange={(e: any) => setDiet(e.target.value)}
-                          className="w-full px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-sm outline-none focus:ring-1 focus:ring-blue-400"
+                          className="w-full min-h-[58px] p-3 bg-gray-50 border border-gray-200 rounded-xl text-sm leading-relaxed outline-none focus:ring-2 focus:ring-blue-400 focus:bg-white transition-all overflow-y-auto resize-y"
                         />
                       </div>
-                      <div className="grid grid-cols-2 gap-3">
-                        <div className="space-y-2">
-                          <label className="text-xs font-bold text-blue-600 uppercase tracking-wider">건강관리</label>
-                          <HangulInput
-                            type="text"
-                            lang="ko"
-                            placeholder="예: 양호함 / 체온: 정상"
-                            value={health}
-                            onChange={(e: any) => setHealth(e.target.value)}
-                            className="w-full px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-sm outline-none focus:ring-1 focus:ring-blue-400"
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <label className="text-xs font-bold text-blue-600 uppercase tracking-wider">프로그램</label>
-                          <HangulInput
-                            type="text"
-                            lang="ko"
-                            placeholder="예: 동화구연"
-                            value={program}
-                            onChange={(e: any) => setProgram(e.target.value)}
-                            className="w-full px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-sm outline-none focus:ring-1 focus:ring-blue-400"
-                          />
-                        </div>
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-xs font-bold text-blue-600 uppercase tracking-wider">기타사항</label>
-                        <HangulInput
-                          type="text"
+                      {/* 건강관리 */}
+                      <div className="space-y-1.5">
+                        <CategoryHeaderWithKeywords
+                          label="건강관리"
+                          categoryKey="single_health"
+                          groups={LIVING_LOG_KEYWORD_GROUPS.health}
+                          isOpen={openKeywordCategory === "single_health"}
+                          onToggle={() => toggleKeywordCategory("single_health")}
+                          onSelectKeyword={(kw) => handleSingleKeywordAppend("health", kw)}
+                          badgeColor="blue"
+                        />
+                        <HangulTextarea
+                          rows={2}
                           lang="ko"
-                          placeholder="상호작용 등"
+                          placeholder="예: 양호함 / 체온: 36.5 정상, 투약 지원"
+                          value={health}
+                          onChange={(e: any) => setHealth(e.target.value)}
+                          className="w-full min-h-[58px] p-3 bg-gray-50 border border-gray-200 rounded-xl text-sm leading-relaxed outline-none focus:ring-2 focus:ring-blue-400 focus:bg-white transition-all overflow-y-auto resize-y"
+                        />
+                      </div>
+
+                      {/* 프로그램 */}
+                      <div className="space-y-1.5">
+                        <SimpleCategoryHeader
+                          label="프로그램"
+                          badgeText="직접 입력"
+                          badgeColor="blue"
+                        />
+                        <HangulTextarea
+                          rows={2}
+                          lang="ko"
+                          placeholder="예: 동화구연, 미술 프로그램 참여"
+                          value={program}
+                          onChange={(e: any) => setProgram(e.target.value)}
+                          className="w-full min-h-[58px] p-3 bg-gray-50 border border-gray-200 rounded-xl text-sm leading-relaxed outline-none focus:ring-2 focus:ring-blue-400 focus:bg-white transition-all overflow-y-auto resize-y"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <CategoryHeaderWithKeywords
+                          label="기타사항"
+                          categoryKey="single_others"
+                          groups={LIVING_LOG_KEYWORD_GROUPS.others}
+                          isOpen={openKeywordCategory === "single_others"}
+                          onToggle={() => toggleKeywordCategory("single_others")}
+                          onSelectKeyword={(kw) => handleSingleKeywordAppend("others", kw)}
+                          badgeColor="blue"
+                        />
+                        <HangulTextarea
+                          rows={3}
+                          lang="ko"
+                          placeholder="동료와의 상호작용, 기분 상태, 특이사항 기재"
                           value={others}
                           onChange={(e: any) => setOthers(e.target.value)}
-                          className="w-full px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-sm outline-none focus:ring-1 focus:ring-blue-400"
+                          className="w-full min-h-[76px] p-3 bg-gray-50 border border-gray-200 rounded-xl text-sm leading-relaxed outline-none focus:ring-2 focus:ring-blue-400 focus:bg-white transition-all overflow-y-auto resize-y"
                         />
                       </div>
                     </div>
                   ) : (
                     <div className="space-y-4 pt-2 border-t border-gray-100">
-                      <div className="space-y-2">
-                        <label className="text-xs font-bold text-purple-600 uppercase tracking-wider">프로그램명</label>
-                        <HangulInput
-                          type="text"
-                          lang="ko"
-                          placeholder="프로그램 제목을 입력하세요"
-                          value={programName}
-                          onChange={(e: any) => setProgramName(e.target.value)}
-                          className="w-full px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-sm outline-none focus:ring-1 focus:ring-purple-400"
+                      <div className="space-y-1.5">
+                        <SimpleCategoryHeader
+                          label="프로그램명"
+                          badgeText="직접 입력"
+                          badgeColor="purple"
+                          icon={<Palette className="w-3.5 h-3.5 text-purple-600 shrink-0" />}
                         />
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-xs font-bold text-purple-600 uppercase tracking-wider">관찰내용</label>
                         <HangulTextarea
                           rows={2}
                           lang="ko"
-                          placeholder="이용인의 실제 행동 중심"
+                          placeholder="프로그램 제목을 입력하세요 (예: 종이접기 교실, 인지활동)"
+                          value={programName}
+                          onChange={(e: any) => setProgramName(e.target.value)}
+                          className="w-full min-h-[54px] p-3 bg-gray-50 border border-gray-200 rounded-xl text-sm leading-relaxed outline-none focus:ring-2 focus:ring-purple-400 focus:bg-white transition-all overflow-y-auto resize-y"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <CategoryHeaderWithKeywords
+                          label="관찰내용"
+                          categoryKey="single_observation"
+                          groups={PROGRAM_LOG_KEYWORD_GROUPS.observation}
+                          isOpen={openKeywordCategory === "single_observation"}
+                          onToggle={() => toggleKeywordCategory("single_observation")}
+                          onSelectKeyword={(kw) => handleSingleKeywordAppend("observation", kw)}
+                          badgeColor="purple"
+                        />
+                        <HangulTextarea
+                          rows={4}
+                          lang="ko"
+                          placeholder="이용인의 실제 참여 태도, 활동 과정, 행동 양상 등 관찰된 내용을 자유롭게 기재해 주세요."
                           value={observation}
                           onChange={(e: any) => setObservation(e.target.value)}
-                          className="w-full px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-sm outline-none focus:ring-1 focus:ring-purple-400 resize-none"
+                          className="w-full min-h-[105px] p-3 bg-gray-50 border border-gray-200 rounded-xl text-sm leading-relaxed outline-none focus:ring-2 focus:ring-purple-400 focus:bg-white transition-all overflow-y-auto resize-y"
                         />
                       </div>
-                      <div className="space-y-2">
-                        <label className="text-xs font-bold text-purple-600 uppercase tracking-wider">지원내용</label>
-                        <HangulInput
-                          type="text"
+                      <div className="space-y-1.5">
+                        <CategoryHeaderWithKeywords
+                          label="지원내용"
+                          categoryKey="single_support"
+                          groups={PROGRAM_LOG_KEYWORD_GROUPS.support}
+                          isOpen={openKeywordCategory === "single_support"}
+                          onToggle={() => toggleKeywordCategory("single_support")}
+                          onSelectKeyword={(kw) => handleSingleKeywordAppend("support", kw)}
+                          badgeColor="purple"
+                        />
+                        <HangulTextarea
+                          rows={3}
                           lang="ko"
-                          placeholder="직원의 개입이나 도움"
+                          placeholder="직원의 개입, 언어적 촉구, 신체적 보조 등 지원 사항 기재"
                           value={support}
                           onChange={(e: any) => setSupport(e.target.value)}
-                          className="w-full px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-sm outline-none focus:ring-1 focus:ring-purple-400"
+                          className="w-full min-h-[76px] p-3 bg-gray-50 border border-gray-200 rounded-xl text-sm leading-relaxed outline-none focus:ring-2 focus:ring-purple-400 focus:bg-white transition-all overflow-y-auto resize-y"
                         />
                       </div>
-                      <div className="grid grid-cols-2 gap-3">
-                        <div className="space-y-2">
-                          <label className="text-xs font-bold text-purple-600 uppercase tracking-wider">의미 있는 반응</label>
-                          <HangulInput
-                            type="text"
-                            lang="ko"
-                            placeholder="작은 변화나 반응"
-                            value={reaction}
-                            onChange={(e: any) => setReaction(e.target.value)}
-                            className="w-full px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-sm outline-none focus:ring-1 focus:ring-purple-400"
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <label className="text-xs font-bold text-purple-600 uppercase tracking-wider">차주 지원계획</label>
-                          <HangulInput
-                            type="text"
-                            lang="ko"
-                            placeholder="실천 가능한 계획"
-                            value={plan}
-                            onChange={(e: any) => setPlan(e.target.value)}
-                            className="w-full px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-sm outline-none focus:ring-1 focus:ring-purple-400"
-                          />
-                        </div>
+                      {/* 의미 있는 반응 */}
+                      <div className="space-y-1.5">
+                        <CategoryHeaderWithKeywords
+                          label="의미 있는 반응"
+                          categoryKey="single_reaction"
+                          groups={PROGRAM_LOG_KEYWORD_GROUPS.reaction}
+                          isOpen={openKeywordCategory === "single_reaction"}
+                          onToggle={() => toggleKeywordCategory("single_reaction")}
+                          onSelectKeyword={(kw) => handleSingleKeywordAppend("reaction", kw)}
+                          badgeColor="purple"
+                        />
+                        <HangulTextarea
+                          rows={3}
+                          lang="ko"
+                          placeholder="성취감 표현, 웃음, 작은 긍정적 변화나 반응"
+                          value={reaction}
+                          onChange={(e: any) => setReaction(e.target.value)}
+                          className="w-full min-h-[76px] p-3 bg-gray-50 border border-gray-200 rounded-xl text-sm leading-relaxed outline-none focus:ring-2 focus:ring-purple-400 focus:bg-white transition-all overflow-y-auto resize-y"
+                        />
+                      </div>
+
+                      {/* 차주 지원계획 */}
+                      <div className="space-y-1.5">
+                        <CategoryHeaderWithKeywords
+                          label="차주 지원계획"
+                          categoryKey="single_plan"
+                          groups={PROGRAM_LOG_KEYWORD_GROUPS.plan}
+                          isOpen={openKeywordCategory === "single_plan"}
+                          onToggle={() => toggleKeywordCategory("single_plan")}
+                          onSelectKeyword={(kw) => handleSingleKeywordAppend("plan", kw)}
+                          badgeColor="purple"
+                        />
+                        <HangulTextarea
+                          rows={3}
+                          lang="ko"
+                          placeholder="난이도 조절, 개별 맞춤 도구 제공 등 다음 실천 계획"
+                          value={plan}
+                          onChange={(e: any) => setPlan(e.target.value)}
+                          className="w-full min-h-[76px] p-3 bg-gray-50 border border-gray-200 rounded-xl text-sm leading-relaxed outline-none focus:ring-2 focus:ring-purple-400 focus:bg-white transition-all overflow-y-auto resize-y"
+                        />
                       </div>
                     </div>
                   )}
@@ -1444,6 +2005,89 @@ export default function App() {
                 </div>
               )}
 
+              {/* 클라우드 저장 여부 체크박스 카드 */}
+              <div 
+                id="auto-save-to-cloud-card"
+                onClick={handleToggleAutoSave}
+                className={`p-3.5 rounded-xl border transition-all cursor-pointer select-none flex items-center justify-between gap-3 ${
+                  autoSaveToCloud 
+                    ? "bg-blue-50/70 border-blue-200/90 shadow-xs hover:bg-blue-50" 
+                    : "bg-gray-50/80 border-gray-200 hover:bg-gray-100/70 text-gray-500"
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors shrink-0 ${
+                    autoSaveToCloud ? "bg-blue-600 text-white shadow-xs" : "bg-gray-200 text-gray-400"
+                  }`}>
+                    {cloudSyncStatus === "saving" ? (
+                      <Loader2 className="w-4 h-4 animate-spin text-white" />
+                    ) : (
+                      <Cloud className="w-4 h-4" />
+                    )}
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className={`text-xs font-bold ${autoSaveToCloud ? "text-gray-900" : "text-gray-700"}`}>
+                        클라우드 보관함에 자동 저장
+                      </span>
+                      {/* 상태 표시 배지 */}
+                      {cloudSyncStatus === "saving" && (
+                        <span className="text-[10px] font-extrabold px-1.5 py-0.5 rounded-md bg-blue-100 text-blue-700 flex items-center gap-1 animate-pulse">
+                          <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                          저장 중...
+                        </span>
+                      )}
+                      {cloudSyncStatus === "saved" && (
+                        <span className="text-[10px] font-extrabold px-1.5 py-0.5 rounded-md bg-emerald-100 text-emerald-800 flex items-center gap-1">
+                          <Check className="w-2.5 h-2.5" />
+                          클라우드에 저장됨
+                        </span>
+                      )}
+                      {cloudSyncStatus === "error" && (
+                        <span className="text-[10px] font-extrabold px-1.5 py-0.5 rounded-md bg-rose-100 text-rose-700 flex items-center gap-1">
+                          <AlertCircle className="w-2.5 h-2.5" />
+                          저장 실패 (로컬 보존됨)
+                        </span>
+                      )}
+                      {cloudSyncStatus === "idle" && (
+                        <>
+                          {autoSaveToCloud && currentUser ? (
+                            <span className="text-[10px] font-extrabold px-1.5 py-0.5 rounded-md bg-blue-100 text-blue-800">
+                              ☁ 클라우드 자동저장 중
+                            </span>
+                          ) : autoSaveToCloud && !currentUser ? (
+                            <span className="text-[10px] font-extrabold px-1.5 py-0.5 rounded-md bg-amber-100 text-amber-800">
+                              로그인 필요
+                            </span>
+                          ) : (
+                            <span className="text-[10px] font-extrabold px-1.5 py-0.5 rounded-md bg-gray-200 text-gray-500">
+                              저장 OFF
+                            </span>
+                          )}
+                        </>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-gray-500 mt-0.5 leading-tight">
+                      {autoSaveToCloud 
+                        ? currentUser
+                          ? `${currentUser.displayName || currentUser.email?.split("@")[0]}님의 Firebase 클라우드 공간에 작성 초안과 생성 일지가 자동 백업됩니다.`
+                          : "클라우드 저장을 활성화하려면 Google 로그인이 필요합니다."
+                        : "클라우드에 저장하지 않고 일지를 1회성으로 생성합니다."}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="relative inline-flex items-center shrink-0">
+                  <input
+                    type="checkbox"
+                    checked={autoSaveToCloud}
+                    onChange={handleToggleAutoSave}
+                    className="sr-only peer"
+                  />
+                  <div className="w-9 h-5 bg-gray-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-600"></div>
+                </div>
+              </div>
+
               <button
                 type="submit"
                 disabled={isLoading}
@@ -1468,9 +2112,9 @@ export default function App() {
             </form>
           </motion.div>
 
-          {/* Output Section */}
-          <div className="flex flex-col h-full">
-            <div className="flex-1 bg-white rounded-2xl shadow-sm border border-gray-100 p-6 flex flex-col relative overflow-hidden min-h-[400px]">
+          {/* Output Section (Moves to right on wide screens, stays below on small screens) */}
+          <div className="flex-1 w-full min-w-0 flex flex-col lg:sticky lg:top-8">
+            <div className="flex-1 bg-white rounded-2xl shadow-sm border border-gray-100 p-5 sm:p-6 flex flex-col relative overflow-hidden min-h-[400px]">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-sm font-bold text-gray-700">생성된 기록</h2>
                 {result && (
@@ -1676,7 +2320,33 @@ export default function App() {
         isOpen={showCloudModal}
         onClose={() => setShowCloudModal(false)}
         logs={savedCloudLogs}
+        currentUser={currentUser}
+        firestoreStatus={firestoreStatus}
+        projectId={firebaseOptions.projectId}
+        onLoginRequest={handleGoogleLogin}
+        onSelectLog={handleSelectSavedLog}
+        onLogsChanged={(updated) => setSavedCloudLogs(updated)}
       />
+
+      {/* Domain Authorization Guide Modal */}
+      <DomainAuthModal
+        isOpen={showDomainAuthModal}
+        onClose={() => setShowDomainAuthModal(false)}
+        projectId={firebaseOptions.projectId}
+      />
+
+      {/* Date Change Confirmation Modal */}
+      <AnimatePresence>
+        {pendingDateChange && (
+          <DateChangeModal
+            currentDate={date}
+            newDate={pendingDateChange}
+            hasContent={checkIfHasContent()}
+            onConfirm={handleConfirmDateChange}
+            onCancel={() => setPendingDateChange(null)}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }

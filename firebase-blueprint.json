@@ -1,8 +1,8 @@
 {
   "entities": {
-    "care_logs": {
-      "title": "Care Logs",
-      "description": "Generated welfare daily logs and program logs",
+    "care_record": {
+      "title": "Care Record",
+      "description": "Generated welfare daily log or program log record for a user",
       "type": "object",
       "properties": {
         "userId": { "type": "string" },
@@ -14,9 +14,20 @@
       },
       "required": ["userId", "clientName", "date", "type", "content", "createdAt"]
     },
-    "batch_presets": {
-      "title": "Batch Presets",
-      "description": "Saved client batch templates",
+    "user_draft": {
+      "title": "User Draft",
+      "description": "Auto-saved active draft inputs and state for a user",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "date": { "type": "string" },
+        "type": { "type": "string" }
+      },
+      "required": ["userId", "date", "type"]
+    },
+    "batch_preset": {
+      "title": "Batch Preset",
+      "description": "Saved client batch templates for a user",
       "type": "object",
       "properties": {
         "userId": { "type": "string" },
@@ -27,10 +38,18 @@
       "required": ["userId", "name", "clients", "updatedAt"]
     }
   },
-  "auth": {
-    "providers": ["anonymous"]
-  },
   "firestore": {
-    "indexes": []
+    "/users/{userId}/records/{recordId}": {
+      "schema": "care_record",
+      "description": "Saved care logs for this user"
+    },
+    "/users/{userId}/draft/{draftId}": {
+      "schema": "user_draft",
+      "description": "Auto-saved active draft for this user"
+    },
+    "/users/{userId}/batch_presets/{presetId}": {
+      "schema": "batch_preset",
+      "description": "Batch client presets for this user"
+    }
   }
 }

@@ -1,8 +1,40 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // Default deny catch-all
     match /{document=**} {
-      allow read, write: if request.auth != null;
+      allow read, write: if false;
+    }
+
+    // Firestore connection test probe
+    match /test/connection {
+      allow read: if true;
+    }
+
+    // User-isolated workspace: Users can strictly only read and write their own documents
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+
+      // Individual care log records
+      match /records/{recordId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+
+      // Active working draft
+      match /draft/{draftId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+
+      // Batch client presets
+      match /batch_presets/{presetId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+
+      // All sub-paths under the user's root
+      match /{document=**} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
     }
   }
 }
+
