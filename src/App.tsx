@@ -762,8 +762,40 @@ export default function App() {
         throw new Error("요청이 취소되었습니다.");
       }
 
-      const resData = await response.json();
-      if (resData.error) throw new Error(resData.error);
+      const contentType = response.headers.get("content-type") || "";
+      let resData: any = null;
+
+      if (contentType.includes("application/json")) {
+        try {
+          resData = await response.json();
+        } catch {
+          const text = await response.text().catch(() => "");
+          resData = { error: text || `서버 응답 파싱 오류 (상태 코드: ${response.status})` };
+        }
+      } else {
+        const text = await response.text().catch(() => "");
+        if (response.status === 404) {
+          resData = { 
+            error: "서버의 AI 생성 API(/api/generate) 엔드포인트를 찾을 수 없습니다 (404). Vercel 배포 설정 및 환경 변수(GEMINI_API_KEY)를 확인해 주십시오." 
+          };
+        } else {
+          resData = { 
+            error: `서버 응답 형식 오류 (${response.status}): ${text.slice(0, 150) || "알 수 없는 응답입니다."}` 
+          };
+        }
+      }
+
+      if (!response.ok) {
+        throw new Error(resData?.error || `AI 기록 생성 요청에 실패했습니다 (상태 코드: ${response.status})`);
+      }
+
+      if (resData?.error) {
+        throw new Error(resData.error);
+      }
+
+      if (!resData || typeof resData.result !== "string") {
+        throw new Error("AI 생성 결과 응답 형식이 올바르지 않습니다.");
+      }
       
       setProgress(100);
       
