@@ -26,7 +26,8 @@ import {
   Cloud,
   Palette,
   LogOut,
-  Check
+  Check,
+  Sparkles
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import Inko from "inko/index.js";
@@ -175,6 +176,20 @@ export default function App() {
 
   // 추천 키워드 열림 상태 (카테고리별 토글)
   const [openKeywordCategory, setOpenKeywordCategory] = useState<string | null>(null);
+
+  // V 1.1 패치노트 임시 창 열림 상태 (호버 / 모바일 클릭)
+  const [showPatchNote, setShowPatchNote] = useState(false);
+
+  useEffect(() => {
+    if (!showPatchNote) return;
+    const handleOutsideClick = () => {
+      setShowPatchNote(false);
+    };
+    window.addEventListener("click", handleOutsideClick);
+    return () => {
+      window.removeEventListener("click", handleOutsideClick);
+    };
+  }, [showPatchNote]);
 
   const toggleKeywordCategory = (catKey: string) => {
     setOpenKeywordCategory(prev => prev === catKey ? null : catKey);
@@ -991,12 +1006,58 @@ export default function App() {
                 referrerPolicy="no-referrer"
               />
             </div>
-            <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-gray-900 inline-flex items-center gap-2">
-              CareLog
-              <span className="text-[11px] sm:text-xs font-semibold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full border border-blue-200/60 leading-none">
-                v1.0
-              </span>
-            </h1>
+            <div className="inline-flex items-end">
+              <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-gray-900 leading-none">
+                CareLog
+              </h1>
+              {/* Version badge placed immediately to the right of 'g' at the lower-right */}
+              <div 
+                className="relative ml-1 sm:ml-1.5 self-end flex items-end"
+                onMouseEnter={() => setShowPatchNote(true)}
+                onMouseLeave={() => setShowPatchNote(false)}
+              >
+                <button
+                  type="button"
+                  id="version-badge-button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowPatchNote((prev) => !prev);
+                  }}
+                  className="text-[10px] sm:text-[11px] font-bold text-blue-600 bg-blue-50 hover:bg-blue-100 active:bg-blue-200 px-1.5 py-0.5 rounded-md border border-blue-200/80 leading-none cursor-pointer transition-all duration-150 shadow-2xs select-none translate-y-[2px] sm:translate-y-[3px] flex items-center gap-0.5 whitespace-nowrap"
+                  title="Version 1.1 패치노트 확인 (클릭 또는 마우스 오버)"
+                  aria-label="Version 1.1 패치노트 확인"
+                >
+                  Version 1.1
+                </button>
+
+                {/* Patch note temporary popover */}
+                <AnimatePresence>
+                  {showPatchNote && (
+                    <motion.div
+                      id="patchnote-popover"
+                      role="dialog"
+                      aria-label="CareLog Version 1.1 패치노트"
+                      initial={{ opacity: 0, y: 4, scale: 0.96 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      exit={{ opacity: 0, y: 4, scale: 0.96 }}
+                      transition={{ duration: 0.15 }}
+                      className="absolute left-1/2 -translate-x-1/2 sm:left-0 sm:translate-x-0 top-full mt-2.5 z-50 w-72 sm:w-80 bg-white rounded-xl p-3 sm:p-3.5 border border-blue-200 shadow-xl text-left"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="pb-1.5 mb-1.5 border-b border-gray-100">
+                        <span className="inline-flex items-center gap-1 text-[11px] font-extrabold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200/60">
+                          <Sparkles className="w-3 h-3 text-blue-500 shrink-0" />
+                          Version 1.1
+                        </span>
+                      </div>
+                      <p className="text-[12px] text-gray-700 font-medium leading-relaxed">
+                        키워드 메모의 전문적인 기록 문단 확장 복구 및 실제 발화·동작 관찰 정보 보존 적용
+                      </p>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            </div>
           </div>
           <p className="text-gray-500 text-xs sm:text-sm">
             간단한 메모를 전문적인 복지 기록으로 변환해 드립니다.
