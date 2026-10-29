@@ -30,6 +30,11 @@ service cloud.firestore {
         allow read, write: if request.auth != null && request.auth.uid == userId;
       }
 
+      // Managed client profiles & behavioral characteristics (up to 30 clients)
+      match /managed_clients/{clientId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+
       // All sub-paths under the user's root
       match /{document=**} {
         allow read, write: if request.auth != null && request.auth.uid == userId;

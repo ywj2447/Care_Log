@@ -453,3 +453,110 @@ export const loadDraftFromCloud = async (): Promise<CareDraft | null> => {
     handleFirestoreError(error, OperationType.GET, path);
   }
 };
+
+// 11. Managed Client Profiles & Behavioral Traits (Up to 30 clients per user)
+export interface ManagedClient {
+  id: string;
+  userId?: string;
+  name: string;
+  gender?: "남" | "여" | "";
+  birth?: string;
+  personality?: string;
+  communication?: string;
+  behaviorTraits?: string;
+  notes?: string;
+  updatedAt?: any;
+}
+
+export const saveManagedClientToFirestore = async (client: ManagedClient): Promise<string | null> => {
+  const user = auth.currentUser;
+  if (!user) return null;
+
+  const path = `users/${user.uid}/managed_clients/${client.id}`;
+  try {
+    await setDoc(doc(db, "users", user.uid, "managed_clients", client.id), {
+      ...client,
+      userId: user.uid,
+      updatedAt: serverTimestamp(),
+    });
+    return client.id;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+};
+
+export const deleteManagedClientFromFirestore = async (clientId: string): Promise<boolean> => {
+  const user = auth.currentUser;
+  if (!user) return false;
+
+  const path = `users/${user.uid}/managed_clients/${clientId}`;
+  try {
+    await deleteDoc(doc(db, "users", user.uid, "managed_clients", clientId));
+    return true;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+};
+
+export const subscribeToManagedClients = (callback: (clients: ManagedClient[]) => void) => {
+  let unsubscribeSnapshot: (() => void) | null = null;
+
+  const updateListener = (user: User | null) => {
+    if (unsubscribeSnapshot) {
+      unsubscribeSnapshot();
+      unsubscribeSnapshot = null;
+    }
+
+    if (!user) {
+      callback([]);
+      return;
+    }
+
+    const path = `users/${user.uid}/managed_clients`;
+    try {
+      const q = query(
+        collection(db, "users", user.uid, "managed_clients"),
+        limit(30)
+      );
+
+      unsubscribeSnapshot = onSnapshot(
+        q,
+        (snapshot) => {
+          const items: ManagedClient[] = [];
+          snapshot.forEach((docSnap) => {
+            const data = docSnap.data();
+            items.push({
+              id: docSnap.id,
+              name: data.name || "",
+              gender: data.gender || "",
+              birth: data.birth || "",
+              personality: data.personality || "",
+              communication: data.communication || "",
+              behaviorTraits: data.behaviorTraits || "",
+              notes: data.notes || "",
+              updatedAt: data.updatedAt,
+            });
+          });
+          // Sort by name or update time
+          items.sort((a, b) => a.name.localeCompare(b.name, "ko"));
+          callback(items);
+        },
+        (error) => {
+          console.warn("Firestore managed_clients subscription notice:", error?.message || error);
+        }
+      );
+    } catch (e) {
+      console.warn("Firestore managed_clients subscription init notice:", e);
+    }
+  };
+
+  const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
+    updateListener(user);
+  });
+
+  return () => {
+    if (unsubscribeSnapshot) unsubscribeSnapshot();
+    unsubscribeAuth();
+  };
+};
+

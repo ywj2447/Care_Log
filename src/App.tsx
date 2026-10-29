@@ -27,7 +27,8 @@ import {
   Palette,
   LogOut,
   Check,
-  Sparkles
+  Sparkles,
+  Users
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import Inko from "inko/index.js";
@@ -44,12 +45,15 @@ import {
   subscribeToAuthState,
   signInWithGoogle,
   logoutUser,
-  firebaseOptions
+  firebaseOptions,
+  ManagedClient,
+  subscribeToManagedClients
 } from "./lib/firebase";
 import { User as FirebaseUser } from "firebase/auth";
 import { CloudLogsModal } from "./components/CloudLogsModal";
 import { DateChangeModal } from "./components/DateChangeModal";
 import { DomainAuthModal } from "./components/DomainAuthModal";
+import { ManagedClientsModal } from "./components/ManagedClientsModal";
 import { LIVING_LOG_KEYWORD_GROUPS, PROGRAM_LOG_KEYWORD_GROUPS } from "./constants/careKeywords";
 import { CategoryHeaderWithKeywords, SimpleCategoryHeader } from "./components/CategoryHeaderWithKeywords";
 
@@ -74,12 +78,39 @@ interface BatchClient {
 
 export default function App() {
   const [customApiKey, setCustomApiKey] = useState(() => localStorage.getItem("carelog_admin_api_key") || "");
-  const [geminiModel, setGeminiModel] = useState(() => localStorage.getItem("carelog_gemini_model") || "gemini-3.1-flash-lite");
+  const [geminiModel, setGeminiModel] = useState(() => {
+    const validModels = [
+      "gemini-3.1-flash-lite",
+      "gemini-2.5-flash",
+      "gemini-flash-latest",
+      "gemini-3.8-flash",
+      "gemini-4-argon"
+    ];
+    const saved = localStorage.getItem("carelog_gemini_model");
+    if (saved && validModels.includes(saved) && saved !== "gemini-3.8-flash") {
+      return saved;
+    }
+    return "gemini-3.1-flash-lite";
+  });
   const [showSettings, setShowSettings] = useState(false);
   const [showApiKey, setShowApiKey] = useState(false);
   const [savedCloudLogs, setSavedCloudLogs] = useState<SavedLogItem[]>([]);
   const [showCloudModal, setShowCloudModal] = useState(false);
   const [showDomainAuthModal, setShowDomainAuthModal] = useState(false);
+
+  // Managed clients state (up to 30)
+  const [managedClients, setManagedClients] = useState<ManagedClient[]>(() => {
+    try {
+      const saved = localStorage.getItem("carelog_managed_clients");
+      if (saved) {
+        return JSON.parse(saved);
+      }
+    } catch {}
+    return [];
+  });
+  const [showManagedClientsModal, setShowManagedClientsModal] = useState(false);
+  const [managedClientsSelectionMode, setManagedClientsSelectionMode] = useState<"none" | "single" | "multiple">("none");
+  const [targetBatchSlotIndexForSelection, setTargetBatchSlotIndexForSelection] = useState<number | null>(null);
 
   // Firebase Auth & Cloud Sync State
   const [currentUser, setCurrentUser] = useState<FirebaseUser | null>(null);
@@ -443,6 +474,14 @@ export default function App() {
       }
     );
 
+    // Subscribe to managed client profiles (up to 30 clients)
+    const unsubscribeManaged = subscribeToManagedClients((clients) => {
+      setManagedClients(clients);
+      try {
+        localStorage.setItem("carelog_managed_clients", JSON.stringify(clients));
+      } catch {}
+    });
+
     // Try loading cloud batch clients if localStorage is default
     loadBatchClientsFromCloud().then((cloudClients) => {
       if (cloudClients && Array.isArray(cloudClients) && cloudClients.length > 0) {
@@ -455,6 +494,7 @@ export default function App() {
 
     return () => {
       unsubscribeLogs();
+      unsubscribeManaged();
     };
   }, [currentUser]);
 
@@ -751,7 +791,33 @@ export default function App() {
     }, 45000); // 45 seconds safety timeout
 
     try {
-      const activeClients = batchClients.filter(c => c.name.trim() !== "");
+      // Find traits for single mode
+      const matchedClient = !isBatchMode && name.trim() 
+        ? managedClients.find(c => c.name.trim() === name.trim()) 
+        : undefined;
+      const singleClientTraits = matchedClient ? {
+        personality: matchedClient.personality,
+        communication: matchedClient.communication,
+        behaviorTraits: matchedClient.behaviorTraits,
+        notes: matchedClient.notes
+      } : undefined;
+
+      // Find traits for batch mode clients
+      const activeClients = batchClients
+        .filter(c => c.name.trim() !== "")
+        .map(c => {
+          const matched = managedClients.find(m => m.name.trim() === c.name.trim());
+          return {
+            ...c,
+            traits: matched ? {
+              personality: matched.personality,
+              communication: matched.communication,
+              behaviorTraits: matched.behaviorTraits,
+              notes: matched.notes
+            } : undefined
+          };
+        });
+
       const response = await fetch("/api/generate", {
         method: "POST",
         headers: { 
@@ -765,6 +831,7 @@ export default function App() {
           data,
           apiKey: customApiKey.trim(),
           model: geminiModel,
+          clientTraits: singleClientTraits,
           ...(isBatchMode ? { names: activeClients } : {})
         }),
         signal: controller.signal,
@@ -1024,10 +1091,10 @@ export default function App() {
                     setShowPatchNote((prev) => !prev);
                   }}
                   className="text-[10px] sm:text-[11px] font-bold text-blue-600 bg-blue-50 hover:bg-blue-100 active:bg-blue-200 px-1.5 py-0.5 rounded-md border border-blue-200/80 leading-none cursor-pointer transition-all duration-150 shadow-2xs select-none translate-y-[2px] sm:translate-y-[3px] flex items-center gap-0.5 whitespace-nowrap"
-                  title="Version 1.1 패치노트 확인 (클릭 또는 마우스 오버)"
-                  aria-label="Version 1.1 패치노트 확인"
+                  title="Version 1.3 패치노트 확인 (클릭 또는 마우스 오버)"
+                  aria-label="Version 1.3 패치노트 확인"
                 >
-                  Version 1.1
+                  Version 1.3
                 </button>
 
                 {/* Patch note temporary popover */}
@@ -1036,23 +1103,58 @@ export default function App() {
                     <motion.div
                       id="patchnote-popover"
                       role="dialog"
-                      aria-label="CareLog Version 1.1 패치노트"
+                      aria-label="CareLog Version 1.3 패치노트"
                       initial={{ opacity: 0, y: 4, scale: 0.96 }}
                       animate={{ opacity: 1, y: 0, scale: 1 }}
                       exit={{ opacity: 0, y: 4, scale: 0.96 }}
                       transition={{ duration: 0.15 }}
-                      className="absolute left-1/2 -translate-x-1/2 sm:left-0 sm:translate-x-0 top-full mt-2.5 z-50 w-72 sm:w-80 bg-white rounded-xl p-3 sm:p-3.5 border border-blue-200 shadow-xl text-left"
+                      className="absolute left-1/2 -translate-x-1/2 sm:left-0 sm:translate-x-0 top-full mt-2.5 z-50 w-80 sm:w-96 bg-white rounded-2xl p-4 border border-blue-200/90 shadow-2xl text-left"
                       onClick={(e) => e.stopPropagation()}
                     >
-                      <div className="pb-1.5 mb-1.5 border-b border-gray-100">
-                        <span className="inline-flex items-center gap-1 text-[11px] font-extrabold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200/60">
-                          <Sparkles className="w-3 h-3 text-blue-500 shrink-0" />
-                          Version 1.1
-                        </span>
+                      <div className="flex items-center justify-between pb-2 mb-2 border-b border-gray-100">
+                        <div className="flex items-center gap-1.5">
+                          <span className="inline-flex items-center gap-1 text-[11px] font-extrabold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-md border border-blue-200/70">
+                            <Sparkles className="w-3 h-3 text-blue-500 shrink-0" />
+                            Version 1.3
+                          </span>
+                          <span className="text-[10px] text-gray-400 font-medium">최신 업데이트</span>
+                        </div>
                       </div>
-                      <p className="text-[12px] text-gray-700 font-medium leading-relaxed">
-                        키워드 메모의 전문적인 기록 문단 확장 복구 및 실제 발화·동작 관찰 정보 보존 적용
-                      </p>
+
+                      <div className="space-y-3 max-h-[320px] overflow-y-auto pr-1 text-left scrollbar-thin">
+                        <div>
+                          <div className="text-[11.5px] font-bold text-gray-900 mb-1.5 flex items-center gap-1.5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-blue-600 inline-block"></span>
+                            v1.3 주요 업데이트
+                          </div>
+                          <ul className="text-[11px] text-gray-600 space-y-1.5 leading-relaxed font-normal">
+                            <li className="flex items-start gap-1.5">
+                              <span className="text-blue-500 font-bold shrink-0">•</span>
+                              <span><strong className="text-gray-800 font-semibold">Gemini 3.1 Flash Lite 탑재</strong>: 기본 AI 엔진을 최신 3.1 Flash Lite로 교체하여 기록 생성 속도를 대폭 향상시키고 쿼터(429/500) 및 지연 문제를 해결했습니다.</span>
+                            </li>
+                            <li className="flex items-start gap-1.5">
+                              <span className="text-blue-500 font-bold shrink-0">•</span>
+                              <span><strong className="text-gray-800 font-semibold">대규모 일괄 생성 최적화</strong>: Thinking(추론) 설정을 최적화하여 다수 이용인 일지 일괄 작성 시 멈춤이나 타임아웃 없이 빠르고 매끄럽게 작성됩니다.</span>
+                            </li>
+                            <li className="flex items-start gap-1.5">
+                              <span className="text-blue-500 font-bold shrink-0">•</span>
+                              <span><strong className="text-gray-800 font-semibold">AI 모델 선택창 최신화</strong>: 구버전 모델을 정리하고 권장 최신 모델(3.1 Flash Lite, 2.5 Flash 등)을 직관적으로 확인 및 선택할 수 있도록 개편했습니다.</span>
+                            </li>
+                          </ul>
+                        </div>
+
+                        <div className="pt-2 border-t border-gray-100">
+                          <div className="text-[10px] font-bold text-gray-400 mb-1">이전 버전 기록</div>
+                          <div className="space-y-1 text-[10.5px] text-gray-500 leading-relaxed">
+                            <p>
+                              <strong className="text-gray-600 font-semibold">v1.2</strong> : 담당 이용인(최대 30명) 관리 및 개인별 특징 자동 연동 기능 추가, 일지 사실성 강화
+                            </p>
+                            <p>
+                              <strong className="text-gray-600 font-semibold">v1.1</strong> : 구글 계정 클라우드 보관함 연동 및 다중 이용인 개별 일지 분리 기능 추가
+                            </p>
+                          </div>
+                        </div>
+                      </div>
                     </motion.div>
                   )}
                 </AnimatePresence>
@@ -1064,6 +1166,22 @@ export default function App() {
           </p>
 
           <div className="flex items-center justify-center gap-2 flex-wrap pt-1">
+            <button
+              type="button"
+              onClick={() => {
+                setManagedClientsSelectionMode("none");
+                setShowManagedClientsModal(true);
+              }}
+              className="flex items-center gap-1.5 px-3.5 py-2 bg-white hover:bg-indigo-50/70 text-indigo-700 text-xs font-bold rounded-xl border border-indigo-200 hover:border-indigo-300 shadow-xs transition-all duration-200 active:scale-95 whitespace-nowrap"
+              title="담당 이용인 등록 및 행동특성 관리 (최대 30명)"
+            >
+              <Users className="w-3.5 h-3.5 text-indigo-600" />
+              <span>담당 이용인</span>
+              <span className="px-1.5 py-0.5 bg-indigo-100 text-indigo-800 text-[10px] font-extrabold rounded-full">
+                {managedClients.length}/30
+              </span>
+            </button>
+
             <button
               type="button"
               onClick={() => setShowCloudModal(true)}
@@ -1078,6 +1196,22 @@ export default function App() {
               )}
             </button>
 
+            {/* API 키 및 모델 설정 button positioned before Google login */}
+            <button
+              type="button"
+              onClick={() => setShowSettings((prev) => !prev)}
+              className="flex items-center gap-2 px-4 py-2 bg-white hover:bg-gray-50 text-gray-700 text-xs font-bold rounded-xl border border-gray-200 hover:border-gray-300 shadow-sm transition-all duration-200 active:scale-95 whitespace-nowrap"
+            >
+              <Settings className="w-4 h-4 text-gray-500 animate-[spin_20s_infinite_linear]" />
+              API 키 및 모델 설정
+              {customApiKey ? (
+                <span className="w-2 h-2 rounded-full bg-emerald-500 ring-2 ring-emerald-100" />
+              ) : (
+                <span className="w-2 h-2 rounded-full bg-amber-500 ring-2 ring-amber-100" />
+              )}
+            </button>
+
+            {/* Google 로그인 / 사용자 프로필 */}
             {currentUser ? (
               <div className="flex items-center gap-1.5 bg-white pl-2.5 pr-1.5 py-1 rounded-xl border border-gray-200 shadow-xs text-xs text-gray-700">
                 <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
@@ -1109,20 +1243,6 @@ export default function App() {
                 <span>Google 로그인</span>
               </button>
             )}
-
-            <button
-              type="button"
-              onClick={() => setShowSettings((prev) => !prev)}
-              className="flex items-center gap-2 px-4 py-2 bg-white hover:bg-gray-50 text-gray-700 text-xs font-bold rounded-xl border border-gray-200 hover:border-gray-300 shadow-sm transition-all duration-200 active:scale-95 whitespace-nowrap"
-            >
-              <Settings className="w-4 h-4 text-gray-500 animate-[spin_20s_infinite_linear]" />
-              API 키 및 모델 설정
-              {customApiKey ? (
-                <span className="w-2 h-2 rounded-full bg-emerald-500 ring-2 ring-emerald-100" />
-              ) : (
-                <span className="w-2 h-2 rounded-full bg-amber-500 ring-2 ring-amber-100" />
-              )}
-            </button>
           </div>
         </header>
 
@@ -1234,13 +1354,13 @@ export default function App() {
                         setGeminiModel(m);
                         localStorage.setItem("carelog_gemini_model", m);
                       }}
-                      className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm outline-none focus:ring-1 focus:ring-blue-400 text-gray-700 cursor-pointer appearance-none"
+                      className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm outline-none focus:ring-1 focus:ring-blue-400 text-gray-700 cursor-pointer appearance-none font-medium"
                     >
-                      <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (추천 - 초고속 경량 기본 모델)</option>
-                      <option value="gemini-3.5-flash">Gemini 3.5 Flash (최신 모델 - 최상 성능 및 고효율)</option>
-                      <option value="gemini-2.5-flash">Gemini 2.5 Flash (가장 향상된 문맥 이해 및 최신 속도)</option>
-                      <option value="gemini-1.5-flash">Gemini 1.5 Flash (안정적인 구조화된 답변 능력)</option>
-                      <option value="gemini-1.5-pro">Gemini 1.5 Pro (복잡한 지시사항 및 높은 정확도)</option>
+                      <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (기본 추천 - 초경량/초고속/최고 안정성)</option>
+                      <option value="gemini-2.5-flash">Gemini 2.5 Flash (검증된 경량 플래시 - 빠른 속도 및 넉넉한 쿼터)</option>
+                      <option value="gemini-flash-latest">Gemini Flash Latest (최신 플래시 버전 자동 반영)</option>
+                      <option value="gemini-3.8-flash">Gemini 3.8 Flash (최신 플래그십 플래시 - 추론 최적화)</option>
+                      <option value="gemini-4-argon">Gemini 4 Argon (고지능 심층 추론 및 복합 지시 분석)</option>
                     </select>
                     <div className="absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none text-gray-400">
                       <svg className="w-4 h-4 fill-none stroke-current" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
@@ -1249,7 +1369,7 @@ export default function App() {
                     </div>
                   </div>
                   <p className="text-[11px] text-gray-400 leading-normal">
-                    * 무료 Key는 각 모델마다 속도/요청 제한이 다르게 적용될 수 있습니다. 429 에러가 발생하면 Lite 또는 Flash 버전을 권장합니다.
+                    * 오류 없이 가장 빠르고 안정적인 <strong>Gemini 3.1 Flash Lite</strong>가 기본 적용됩니다. 필요에 따라 검증된 2.5 Flash, 최신 플래시 자동(Flash Latest), 심층 추론(4 Argon)을 선택할 수 있습니다.
                   </p>
                 </div>
 
@@ -1342,12 +1462,28 @@ export default function App() {
 
                   {/* Cohesive Batch Mode Workspace */}
                   <div className="space-y-4 p-4 sm:p-5 bg-gray-50/50 rounded-2xl border border-gray-200/60 shadow-xs">
-                    <div className="flex items-center justify-between">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
                       <span className="text-xs font-bold text-gray-700 flex items-center gap-1.5">
                         <User className={`w-4 h-4 ${type === "생활일지" ? "text-blue-500" : "text-purple-500"}`} />
                         이용인 등록 및 개별 내용 입력 (최대 6명)
                       </span>
-                      <span className="text-[10px] text-gray-400 font-medium">이름이 입력된 대상만 일지가 생성됩니다.</span>
+                      <div className="flex items-center gap-2">
+                        {managedClients.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setManagedClientsSelectionMode("multiple");
+                              setShowManagedClientsModal(true);
+                            }}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 transition-colors shadow-2xs"
+                            title="등록된 담당 이용인 목록에서 오늘 참여한 인원들을 한 번에 선택하여 슬롯에 배치합니다"
+                          >
+                            <Users className="w-3.5 h-3.5 text-indigo-600" />
+                            <span>담당 이용인 일괄 불러오기</span>
+                          </button>
+                        )}
+                        <span className="text-[10px] text-gray-400 font-medium hidden sm:inline">이름이 입력된 대상만 생성</span>
+                      </div>
                     </div>
 
                     {/* Quick Selection Slider Grid with Progress - Always fixed 3 cols */}
@@ -1357,6 +1493,7 @@ export default function App() {
                         const total = type === "생활일지" ? 6 : 5;
                         const isNameEntered = client.name.trim().length > 0;
                         const isSelected = activeEditIndex === idx;
+                        const isMatchedTrait = isNameEntered && managedClients.some(m => m.name.trim() === client.name.trim());
                         return (
                           <button
                             key={idx}
@@ -1376,6 +1513,9 @@ export default function App() {
                             <span className="truncate text-xs font-extrabold max-w-[65px] sm:max-w-none">
                               {client.name.trim() || "미등록"}
                             </span>
+                            {isMatchedTrait && (
+                              <Sparkles className="w-2.5 h-2.5 text-amber-300 shrink-0" />
+                            )}
                             <span className={`text-[9px] px-1 py-0.5 font-bold rounded shrink-0 ${
                               isSelected 
                                 ? "bg-white/20 text-white" 
@@ -1433,9 +1573,24 @@ export default function App() {
                         )}
                       </div>
 
-                      {/* Name Row */}
-                      <div className="space-y-1 mb-3">
-                        <span className="text-[10px] font-bold text-gray-500">성함</span>
+                      {/* Name Row with Managed Client Selection */}
+                      <div className="space-y-1.5 mb-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-bold text-gray-500">성함</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setTargetBatchSlotIndexForSelection(activeEditIndex);
+                              setManagedClientsSelectionMode("single");
+                              setShowManagedClientsModal(true);
+                            }}
+                            className="text-[10px] text-indigo-600 hover:text-indigo-800 font-bold flex items-center gap-1 hover:underline cursor-pointer"
+                          >
+                            <Users className="w-3 h-3" />
+                            <span>담당 이용인에서 선택</span>
+                          </button>
+                        </div>
+                        
                         <HangulInput
                           type="text"
                           lang="ko"
@@ -1448,6 +1603,24 @@ export default function App() {
                           }}
                           className="w-full px-2.5 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs outline-none focus:ring-1 focus:ring-blue-400 font-bold"
                         />
+
+                        {/* Display Trait Notice if Matched */}
+                        {(() => {
+                          const currentName = batchClients[activeEditIndex]?.name?.trim();
+                          const matched = currentName ? managedClients.find(m => m.name.trim() === currentName) : null;
+                          if (!matched) return null;
+                          return (
+                            <div className="mt-1 p-2 bg-indigo-50/70 rounded-lg border border-indigo-100 text-[11px] text-indigo-900 flex items-start gap-1.5">
+                              <Sparkles className="w-3.5 h-3.5 text-indigo-500 shrink-0 mt-0.5" />
+                              <div className="leading-tight">
+                                <span className="font-extrabold text-indigo-800">특징 참고 연동됨: </span>
+                                {matched.personality && <span className="mr-1.5">성향({matched.personality})</span>}
+                                {matched.communication && <span className="mr-1.5">소통({matched.communication})</span>}
+                                {matched.behaviorTraits && <span>주의({matched.behaviorTraits})</span>}
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>
 
                       {!batchClients[activeEditIndex]?.name.trim() && (
@@ -1794,9 +1967,23 @@ export default function App() {
               ) : (
                 <>
                   <div className="space-y-1.5">
-                    <label className="text-xs font-semibold flex items-center gap-1.5 text-gray-600">
-                      <User className={`w-3.5 h-3.5 ${type === "생활일지" ? "text-blue-500" : "text-purple-500"} transition-colors`} /> 이름
-                    </label>
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-semibold flex items-center gap-1.5 text-gray-600">
+                        <User className={`w-3.5 h-3.5 ${type === "생활일지" ? "text-blue-500" : "text-purple-500"} transition-colors`} /> 이름
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setManagedClientsSelectionMode("single");
+                          setShowManagedClientsModal(true);
+                        }}
+                        className="text-[11px] text-indigo-600 hover:text-indigo-800 font-bold flex items-center gap-1 hover:underline cursor-pointer"
+                      >
+                        <Users className="w-3.5 h-3.5" />
+                        <span>담당 이용인에서 선택</span>
+                      </button>
+                    </div>
+
                     <HangulInput
                       type="text"
                       lang="ko"
@@ -1806,8 +1993,26 @@ export default function App() {
                       placeholder="이용인 성함 (예: 김OO)"
                       value={name}
                       onChange={(e: any) => setName(e.target.value)}
-                      className={`w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:ring-2 ${type === "생활일지" ? "focus:ring-blue-500" : "focus:ring-purple-500"} focus:border-transparent outline-none transition-all placeholder:text-gray-400`}
+                      className={`w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:ring-2 ${type === "생활일지" ? "focus:ring-blue-500" : "focus:ring-purple-500"} focus:border-transparent outline-none transition-all placeholder:text-gray-400 font-bold`}
                     />
+
+                    {/* Display Trait Notice if Matched */}
+                    {(() => {
+                      const trimmedName = name.trim();
+                      const matched = trimmedName ? managedClients.find(m => m.name.trim() === trimmedName) : null;
+                      if (!matched) return null;
+                      return (
+                        <div className="mt-1 p-2 bg-indigo-50/70 rounded-lg border border-indigo-100 text-[11px] text-indigo-900 flex items-start gap-1.5">
+                          <Sparkles className="w-3.5 h-3.5 text-indigo-500 shrink-0 mt-0.5" />
+                          <div className="leading-tight">
+                            <span className="font-extrabold text-indigo-800">특징 참고 연동됨: </span>
+                            {matched.personality && <span className="mr-1.5">성향({matched.personality})</span>}
+                            {matched.communication && <span className="mr-1.5">소통({matched.communication})</span>}
+                            {matched.behaviorTraits && <span>주의({matched.behaviorTraits})</span>}
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   <div className="grid grid-cols-2 gap-2.5">
@@ -2440,6 +2645,45 @@ export default function App() {
           />
         )}
       </AnimatePresence>
+
+      {/* Managed Clients Modal (Up to 30 clients) */}
+      <ManagedClientsModal
+        isOpen={showManagedClientsModal}
+        onClose={() => {
+          setShowManagedClientsModal(false);
+          setTargetBatchSlotIndexForSelection(null);
+        }}
+        clients={managedClients}
+        selectionMode={managedClientsSelectionMode}
+        isLoggedIn={!!currentUser}
+        onOpenLogin={handleGoogleLogin}
+        onSelectClient={(client) => {
+          if (isBatchMode && targetBatchSlotIndexForSelection !== null) {
+            const updated = [...batchClients];
+            if (updated[targetBatchSlotIndexForSelection]) {
+              updated[targetBatchSlotIndexForSelection].name = client.name;
+              setBatchClients(updated);
+            }
+          } else {
+            setName(client.name);
+          }
+          setShowManagedClientsModal(false);
+          setTargetBatchSlotIndexForSelection(null);
+          showNotice(`'${client.name}' 이용인이 선택되었습니다.`);
+        }}
+        onSelectMultipleClients={(selected) => {
+          if (selected.length > 0) {
+            const updated = [...batchClients];
+            selected.forEach((client, idx) => {
+              if (idx < updated.length) {
+                updated[idx].name = client.name;
+              }
+            });
+            setBatchClients(updated);
+            showNotice(`${selected.length}명의 담당 이용인이 일괄 슬롯에 배치되었습니다.`);
+          }
+        }}
+      />
     </div>
   );
 }

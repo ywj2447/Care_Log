@@ -36,6 +36,23 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["userId", "name", "clients", "updatedAt"]
+    },
+    "managed_client": {
+      "title": "Managed Client",
+      "description": "Client profile with behavioral traits and care characteristics managed by the user",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "name": { "type": "string" },
+        "gender": { "type": "string" },
+        "birth": { "type": "string" },
+        "personality": { "type": "string" },
+        "communication": { "type": "string" },
+        "behaviorTraits": { "type": "string" },
+        "notes": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "name", "updatedAt"]
     }
   },
   "firestore": {
@@ -50,6 +67,10 @@
     "/users/{userId}/batch_presets/{presetId}": {
       "schema": "batch_preset",
       "description": "Batch client presets for this user"
+    },
+    "/users/{userId}/managed_clients/{clientId}": {
+      "schema": "managed_client",
+      "description": "Managed client profiles and behavioral traits for this user"
     }
   }
 }

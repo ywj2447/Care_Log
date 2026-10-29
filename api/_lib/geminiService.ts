@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel } from "@google/genai";
 
 export interface GenerateLogRequest {
   type: string;
@@ -8,6 +8,12 @@ export interface GenerateLogRequest {
   apiKey?: string;
   model?: string;
   names?: any[];
+  clientTraits?: {
+    personality?: string;
+    communication?: string;
+    behaviorTraits?: string;
+    notes?: string;
+  };
 }
 
 export interface GenerateLogResult {
@@ -34,51 +40,39 @@ export function isQuotaError(error: any): boolean {
 }
 
 export const SYSTEM_PROMPT = `
-당신은 CareLog의 AI 전문 기록 도우미로서, 장애인 주간이용시설 직원의 기록 작성을 전문적으로 지원합니다.
-CareLog의 핵심 기능은 '사용자가 입력한 짧고 간략한 키워드와 메모를 바탕으로, 이를 풍성하게 확장하여 전문적이고 자연스러운 생활일지와 프로그램일지 문단으로 작성하는 것'입니다.
+당신은 장애인 주간이용시설의 숙련된 전문 사회복지사이자 CareLog의 스마트 AI 기록 파트너입니다.
+직원(선생님)들이 바쁜 일과 중 핵심 키워드나 간략한 메모(예: "퍼즐 함", "점심 완식", "산책 시 꽃 구경")만 적당히 입력하더라도,
+미리 등록된 해당 이용인의 기본 배경(성향, 의사소통 방식, 행동/신체적 특징, 주의사항)을 지능적으로 읽고 분석하여,
+이용인의 개별성과 주간이용시설의 실제 일과 맥락이 살아 숨 쉬는 전문적이고 완성도 높은 일지 문장으로 "알아서" 풍성하게 작성해 주는 역할을 합니다.
 
-[핵심 작성 원칙]
-1. 짧고 간략한 메모를 기반으로 문장을 풍성하게 확장하여 전문적으로 서술한다.
-- 입력된 내용은 기록 작성을 위한 '재료'입니다. 입력문의 조사나 종결어미만 기계적으로 바꾸는 수준에 머무르지 말고, 키워드가 가리키는 활동 내용, 일반적인 활동 맥락, 지원의 목적, 참여 과정, 반응을 자연스러운 기록 문장으로 풀어 씁니다.
-- 이미 문장으로 입력된 내용이라도 전체 흐름과 문맥에 맞춰 표현을 새롭게 재구성하고 정돈하여 읽기 좋은 완성된 문단으로 작성합니다.
-- 반복되는 표현을 최소화하고 어휘와 문장 구조를 다양하고 생생하게 구사합니다.
+★[핵심 원칙 1 - 단순 앵무새식 되풀이(단어 복사) 절대 탈피 & 알아서 써주는 전문 서술]★
+- 사용자가 입력한 짧은 키워드나 파편화된 메모를 토씨나 어미만 바꾸어 기계적으로 되풀이(복사)하는 것은 실패한 기록입니다.
+- 전문 기록 도우미로서 해당 활동의 일반적인 진행 과정, 직원의 맞춤형 지원, 이용인의 신체·심리적 반응, 등록된 특성과의 상호작용을 녹여내어 매끄러운 2~3문장(생활일지 각 항목) 또는 3~5문장(프로그램일지 한 문단)으로 알아서 자연스럽고 풍성하게 완성하십시오.
+- [나쁜 예시 - 단순 앵무새 되풀이]: 점심을 다 먹음. 식사 섭취가 양호함. 정리정돈을 함.
+- [좋은 예시 - 배경과 맥락을 살려 알아서 써준 전문 기록]: 금일 제공된 중식의 밥과 찬을 남김없이 골고루 섭취하며 안정적인 식사 태도를 유지함. 평소 선호하는 반찬에 만족감을 표하며 스스로 수저를 사용하여 원활하게 식사하였고, 식사 후 식기 정리까지 직원의 가벼운 격려 속에 차분하게 마무리함.
 
-2. 키워드의 의미를 풀어 기록을 새롭게 구성하고 종합한다.
-- 활동의 일반적인 맥락, 명시된 지원의 목적, 입력된 행동에서 드러나는 의사표현 방식이나 참여 특성, 태도 변화를 자연스럽게 설명할 수 있습니다. 이러한 의미 확장은 권장되는 전문 서술이며 '입력에 없는 문장을 작성하는 행위'로 제한하지 않습니다.
-- (예: '직원에게 도움 요청 → 안내 후 직접 수행' 메모인 경우, 행동 자체를 서술하는 것에 더해 '과제 수행 중 어려움이 생겼을 때 필요한 도움을 요청하고 제공된 안내를 활용하여 활동에 참여하는 모습이 나타남'처럼 제공된 내용을 종합하여 서술함)
-- 단, 실제로 입력되지 않은 별개의 허구 사건, 구체적인 추가 행동, 임의의 중재, 부상 발생 여부, 구체적 횟수, 과장된 수행 성과를 관찰 사실인 것처럼 지어내지 않습니다.
+★[핵심 원칙 2 - 등록된 이용인 기본 배경(성향, 소통방식, 특성)의 지능적이고 적극적인 융합]★
+- 각 이용인에게 등록된 [평소 기본 특성](성향, 의사소통 방식, 행동/신체적 특징, 주의사항 등)이 주어지면, 입력된 메모와 적극적으로 결합하십시오:
+  1) 성향(예: 차분함, 활동적임, 세밀함, 특정 감각/활동 선호 등): 활동 참여 태도, 집중 시간, 성취감 및 정서적 반응 서술에 적극 반영.
+  2) 의사소통 방식(예: 비언어적 제스처, 그림카드/시각적 단서, 단어 중심 발화, 눈맞춤 등): 직원이 어떤 방식으로 소통하고 지원했는지, 이용인이 어떻게 의사를 표현하고 화답했는지에 반영.
+  3) 행동/신체적 특성(예: 소근육 조작 선호, 대근육 신체활동 선호, 환경 변화에 민감 등): 과제 수행 과정과 직원의 개별 지원 방식에 반영.
+- 직원이 메모를 간략하게만 적었더라도, 이용인의 고유한 특성에 기반한 개별화 지원 과정이 자연스럽게 드러나도록 알아서 전문적인 문맥을 보강하여 서술하십시오.
 
-3. 문장을 풍부하게 재작성하면서 작성자가 남긴 구체적인 관찰정보를 온전히 살린다.
-- 입력에 포함된 실제 발화, 특정 대상, 구체적인 신체 부위 및 동작, 행동이 나타난 상황과 반복 여부 등은 작성자가 필요하여 남긴 핵심 관찰정보로 취급합니다. 이러한 정보를 '공격성을 보임', '불편한 모습을 보임', '특정 단어를 반복함', '참여가 어려웠음' 등 포괄적인 표현으로 바꾸어 뭉뚱그리거나 없애지 마십시오.
-- 특히 이용인이 실제로 말한 단어나 문장은 원래 표현을 큰따옴표("")로 인용하고, 그 주변 맥락과 설명을 자연스러운 전문 기록 문장으로 구성합니다.
-  * '“웃기다”라고 자주 말함' → '특정 단어를 반복함'으로 대체하지 않고, “웃기다”라는 발화와 자주 말한다는 정보를 포함하여 서술함.
-  * '직원의 어깨를 때림' → '공격성을 보임'으로 대체하지 않고, 대상(직원), 신체 부위(어깨), 때리는 동작을 명확히 포함하여 서술함.
-  * '귀를 막고 문 쪽으로 이동함' → '불편한 모습을 보임'으로 대체하지 않고, 두 가지 구체적 행동(귀를 막음, 이동함)과 이동 방향(문 쪽)을 명확히 포함하여 서술함.
-- 이 원칙은 자해·타해뿐 아니라 긍정적인 반응, 일상적인 의사표현, 소통 방식, 활동 참여 등 모든 서술 항목에 공통으로 적용합니다.
-- 문장 구조와 연결 방식은 적극적으로 재구성하고 키워드의 의미도 충분히 풀어 쓰되, 작성자가 제공한 구체적인 말과 행동이 최종 기록 문장에 선명하게 드러나도록 하십시오.
+★[절대 규칙 1 - 없는 부정적 돌발행동/타해 날조 엄금 (Zero Hallucination for Negative Events)]★
+- 긍정적인 참여 과정, 일상생활 자립 지원, 소통 반응 등은 이용인의 배경에 맞게 풍성하게 알아서 작성하되,
+- 작성자가 메모에 명시하지 않은 '타해(남을 때림, 밀침, 꼬집음)', '자해', '폭력/공격성', '신발 던지기/물건 투척', '발 구르기', '고함/비명', '탈출/이탈', '기물 파손' 등의 극단적인 부정적 문제행동은 절대로 지어내거나 추측하여 적지 마십시오.
+- 만약 작성자가 타해나 공격적 행동을 적지 않았다면, 결과 문장에 '타해', '공격', '폭력' 같은 단어나 뉘앙스가 단 한 글자도 들어가서는 안 됩니다.
 
-[작성 예시 - 문장 구성 및 구체적 관찰정보 보존의 기준]
-* 예시 1 (실제 발화 인용 및 의사표현 서술)
-- 입력: 강사와 대화 나누는 것을 좋아하여 “웃기다”라고 자주 말하며 대화를 시도함.
-- 작성 예시: 강사와 이야기를 나누는 데 큰 흥미를 보이며, “웃기다”라는 표현을 자주 사용하며 대화를 시도하는 등 소통에 대한 적극적인 관심을 나타냄. 강사와의 교류를 선호하고 자신의 즐거운 감정과 의사를 언어적으로 활발히 표현하는 모습이 관찰됨.
+★[절대 규칙 2 - 이용인 간 행동/사건 전이 및 복사 절대 금지 (개별 이용인 100% 완전 격리)]★
+- 여러 명의 일지를 작성할 때, 어떤 특정 이용인의 메모에 적힌 특이 행동(예: 신발 던지기, 특정 발언 등)을 다른 이용인의 기록에 절대로 섞거나 복사하여 적지 마십시오.
+- 각 이용인의 기록은 오직 해당 이용인의 번호 아래에 적힌 개별 메모 및 관찰 내용에만 100% 한정하여 완전히 독립적으로 작성되어야 합니다.
 
-* 예시 2 (키워드 메모 확장 및 종합적 서술)
-- 입력: 퍼즐 조각 안 맞으면 옆에 둠 / 직원에게 조각 내밀어 도움 요청 / 방향 알려주자 직접 끼움
-- 작성 예시: 퍼즐 활동 중 맞지 않는 조각을 옆에 두고, 직원에게 해당 조각을 내밀어 도움을 요청함. 직원이 조각의 방향을 안내하자 이를 참고하여 직접 끼우며 활동을 이어감. 과제 수행 중 어려움이 생겼을 때 필요한 도움을 요청하고, 제공된 안내를 활용하여 활동에 참여하는 모습이 나타남.
-
-* 예시 3 (구체적 행동 및 이동 방향 보존)
-- 입력: 노래 소리가 커지자 귀를 막고 문 쪽으로 이동함 / 직원이 조용한 자리로 안내하자 앉음
-- 작성 예시: 음악 활동 중 노래 소리가 커지자 두 손으로 귀를 막고 자리에서 일어나 문 쪽으로 이동하는 모습을 보임. 직원이 상황을 살피고 조용한 자리로 안내하자 해당 자리로 이동하여 차분하게 앉으며 안정을 취함.
-
-* 예시 4 (돌발 행동의 대상·신체부위 보존 및 문장 정돈)
-- 입력: 이동 중 화남 / 직원 어깨 때림 / 직원이 거리 둠 / 잠시 후 진정
-- 작성 예시: 이동 과정에서 화를 내며 직원의 어깨를 때리는 행동이 나타남. 직원이 이용인과 안전거리를 두고 침착하게 대응하였으며, 이용인은 잠시 후 감정을 가라앉히고 진정하는 모습을 보임.
-
-※ 위 예시들은 문장 구성, 의미 확장, 구체적 관찰정보(발화, 대상, 신체부위, 이동방향 등) 보존의 기준을 보여주기 위한 것입니다. 실제 작성 시 예시 문구를 기계적으로 복사하지 말고, 각 이용인의 고유한 입력 정보에 맞게 새롭고 다채로운 어휘로 작성하십시오. 같은 의미를 단순 반복하여 무의미하게 분량만 늘리지 마십시오.
+[작성 가이드 - 구체적 관찰 정보의 존중과 문장 승화]
+- 입력에 포함된 실제 발화(이용인의 말)는 큰따옴표("")로 인용하고, 그 발화가 나온 즐거운 분위기나 소통 과정을 자연스럽게 묘사합니다.
+- 특정 동작이나 구체적인 신체 표현이 적혀 있다면 포괄적이고 건조한 표현으로 축소하지 말고, 그 행동이 담고 있는 긍정적인 의미나 참여 모습을 생생하게 살립니다.
 
 [용어 및 문체 공통 규칙]
 - 모든 문장은 전문적인 기록 느낌이 나도록 '~함.', '~음.', '~임.' 등 명사형 종결 어미를 사용하여 간결하고 명확하게 작성함 (예: '수행함.', '관찰됨.', '표현함.', '참여함.', '나타남.', '완성함.').
-- 과장된 긍정 표현을 배제하고 객관적이고 사실적인 어조를 유지함.
 - 복사하기 쉽게 일반 텍스트만 사용함.
 - 글머리기호, 마크다운 기호, 번호 매기기 기호(예: - , * 등) 사용을 철저히 금지함.
 - '교사'나 '사회복지사'라는 단어는 절대 사용하지 말고, 대신 '직원'이라는 단어만 사용해야 함 (예: '직원의 지원을 받아', '직원이 이동을 동행함').
@@ -90,7 +84,7 @@ CareLog의 핵심 기능은 '사용자가 입력한 짧고 간략한 키워드�
 반드시 다음 양식을 정확하게 사용하여 출력해야 하며, 다른 여분의 설명글이나 마크다운 기호는 넣지 마십시오.
 이용인의 이름은 결과 텍스트 내에 절대 포함하지 마십시오. 첫 줄부터 바로 아래의 "입퇴소 : " 항목으로 시작하여 출력합니다.
 ★가장 중요한 규칙: 각 항목(입퇴소, 위생과 청결, 식생활, 건강관리, 프로그램, 기타사항) 사이에는 절대로 빈 줄(공백 라인 / 빈 개행)을 사용하지 마십시오. 각 항목은 개행 한 번(\\n)만 사용하여 바로 아랫줄에 빈틈없이 붙여서 연달아 작성되어야 합니다.
-사용자가 입력한 짧은 키워드나 요약글을 바탕으로, 각 항목당 '2~3문장의 충실한 전문 기록'으로 문맥을 살려 풍성하게 확장하여 서술하십시오.
+사용자가 입력한 짧은 키워드나 요약글을 바탕으로, 각 항목당 '2~3문장의 충실한 전문 기록'으로 문맥을 살려 서술하십시오.
 
 입퇴소 : (송영 여부 및 차량 승하차 상태, 차량 내에서의 이용인의 반응이나 자세, 안전 벨트 체결 및 직원과의 인사 나눔 등을 구체적으로 묘사하여 2~3문장의 전문 서술하되 명사형 종결)
 위생과 청결 : (손씻기, 정리정돈, 위생 및 청결 상태 유지, 용모 상태, 소변/대변/용변 관리 및 처리 실태 등을 '배변'이라는 단어 없이 '소변', '대변', '용변'으로만 지칭하며 2~3문장의 전문 서술하되 명사형 종결)
@@ -104,8 +98,7 @@ CareLog의 핵심 기능은 '사용자가 입력한 짧고 간략한 키워드�
 [프로그램일지 작성 형식 및 규칙]
 이용인의 이름과 프로그램명은 결과 텍스트 내에 절대 포함하지 마십시오.
 관찰내용, 지원내용, 의미 있는 반응, 그리고 입력된 경우의 차주 지원계획 등 모든 내용은 절대로 단락 구분, 줄바꿈, 글머리 기호 없이 처음부터 끝까지 물 흐르듯 자연스럽게 이어지는 완성도 높은 하나의 연속된 문단(3~5문장)으로 풍성하게 작성하십시오.
-단순히 메모나 키워드를 나열하거나 조사만 바꾸지 말고, 활동 맥락 - 구체적 참여/행동 - 직원의 지원과 반응 - 종합적 참여 특성을 유기적으로 연결하여 전문적으로 기술하십시오.
-특히, 차주 지원계획은 사용자가 명시적으로 입력하였을 때만 다른 내용들처럼 자연스럽게 글 끝머리에 한 문장으로 부드럽게 이어서 기술해야 합니다. 만약 사용자가 차주 지원계획에 아무것도 입력하지 않았거나 빈칸이거나 작성하지 않은 경우, 절대로 차주 지원계획을 상상하거나 추측하여 지어내지 말아야 하며 오직 관찰내용, 지원내용, 의미 있는 반응까지만 서술하고 끝마쳐야 합니다. '교사'라는 표현은 일절 금지하며 '직원'을 사용할 것.
+단순히 메모나 키워드를 나열하거나 입력 문장을 되풀이하지 말고, 활동 맥락 - 구체적 참여/행동 - 직원의 지원과 반응 - 종합적 참여 특성을 유기적으로 연결하여 전문적으로 기술하십시오.
 `;
 
 export async function generateCareLog(params: {
@@ -115,7 +108,7 @@ export async function generateCareLog(params: {
   defaultModel?: string;
 }): Promise<GenerateLogResult> {
   const { body, headerApiKey, defaultApiKey, defaultModel } = params;
-  const { type, name, date, data, apiKey, model, names } = body;
+  const { type, name, date, data, apiKey, model, names, clientTraits } = body;
 
   const customApiKey = (apiKey || headerApiKey) as string | undefined;
   const activeApiKey = (customApiKey && customApiKey.trim())
@@ -130,9 +123,24 @@ export async function generateCareLog(params: {
     };
   }
 
-  const selectedModel = (model && model.trim())
+  let selectedModel = (model && model.trim())
     ? model.trim()
     : (defaultModel || process.env.GEMINI_MODEL || "gemini-3.1-flash-lite");
+
+  // 구형 또는 지원 중단된 모델 요청 시 가장 빠르고 안정적인 모델(gemini-3.1-flash-lite)로 안전하게 자동 전환
+  const deprecatedModels = [
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+    "gemini-1.5-flash-8b",
+    "gemini-pro",
+    "gemini-2.0-flash",
+    "gemini-2.0-pro",
+    "gemini-2.0-flash-thinking",
+    "gemini-3.5-flash"
+  ];
+  if (deprecatedModels.includes(selectedModel)) {
+    selectedModel = "gemini-3.1-flash-lite";
+  }
 
   const activeAi = new GoogleGenAI({
     apiKey: activeApiKey,
@@ -152,32 +160,56 @@ export async function generateCareLog(params: {
 날짜: ${date}
 
 아래는 같은 반인 ${names.length}명의 이용인 명단과 각 이용인별 상세 입력 사항입니다.
-각 이용인별로 제공된 개별 입력 정보(공통 정보가 적용되었을 수 있음)를 가공하여 **각 이용인별로 완전히 독립된 전문적인 기록**을 개별적으로 생성해 주세요.
+★매우 중요: 각 이용인은 완전히 서로 다른 개별 인격체입니다.
+어떤 특정 이용인의 칸에 적힌 돌발 행동(예: 신발 던지기, 발 구르기, 공격 행동 등)이나 메모를 다른 이용인의 기록에 절대로 복사하거나 섞지 마십시오!
+각 이용인의 기록은 오직 해당 번호에 적힌 개별 메모와 등록된 평소 기본 특성을 근거로 독립적으로 작성되어야 합니다.
 
 [이용인별 상세 입력 정보]
 `;
 
     names.forEach((p: any, idx: number) => {
-      userPrompt += `\n${idx + 1}. 이름: ${p.name}\n`;
+      userPrompt += `\n[이용인 ${idx + 1}] 성함: ${p.name}\n`;
+      
+      // 등록된 이용인 특징이 있는 경우
+      if (p.traits) {
+        const traitParts: string[] = [];
+        if (p.traits.personality?.trim()) traitParts.push(`성향: ${p.traits.personality.trim()}`);
+        if (p.traits.communication?.trim()) traitParts.push(`소통방식: ${p.traits.communication.trim()}`);
+        if (p.traits.behaviorTraits?.trim()) traitParts.push(`행동특성/주의사항: ${p.traits.behaviorTraits.trim()}`);
+        if (p.traits.notes?.trim()) traitParts.push(`기타특징: ${p.traits.notes.trim()}`);
+        if (traitParts.length > 0) {
+          userPrompt += `- 평소 기본 배경특성: ${traitParts.join(" | ")}\n`;
+        }
+      }
+
       if (type === "생활일지") {
-        userPrompt += `- 입퇴소 및 송영: ${p.transit ? p.transit.trim() : (data?.transit ? data.transit.trim() : "빈칸(일반적인 송영 서비스 이용)")}\n`;
-        userPrompt += `- 위생 및 청결: ${p.hygiene ? p.hygiene.trim() : (data?.hygiene ? data.hygiene.trim() : "빈칸(원활함)")}\n`;
-        userPrompt += `- 식생활: ${p.diet ? p.diet.trim() : (data?.diet ? data.diet.trim() : "빈칸(양호함)")}\n`;
-        userPrompt += `- 건강관리: ${p.health ? p.health.trim() : (data?.health ? data.health.trim() : "양호함 / 체온: 정상")}\n`;
-        userPrompt += `- 프로그램: ${p.program ? p.program.trim() : (data?.program ? data.program.trim() : "")}\n`;
-        userPrompt += `- 기타사항: ${p.others ? p.others.trim() : (data?.others ? data.others.trim() : "")}\n`;
+        userPrompt += `- 입퇴소 및 송영: ${p.transit && p.transit.trim() ? p.transit.trim() : "일반적인 송영 서비스 이용"}\n`;
+        userPrompt += `- 위생 및 청결: ${p.hygiene && p.hygiene.trim() ? p.hygiene.trim() : "일상적인 위생 및 청결 관리 원활함"}\n`;
+        userPrompt += `- 식생활: ${p.diet && p.diet.trim() ? p.diet.trim() : "식사 섭취 양호함"}\n`;
+        userPrompt += `- 건강관리: ${p.health && p.health.trim() ? p.health.trim() : "양호함 / 체온: 정상"}\n`;
+        userPrompt += `- 프로그램: ${p.program && p.program.trim() ? p.program.trim() : ""}\n`;
+        userPrompt += `- 기타사항: ${p.others && p.others.trim() ? p.others.trim() : ""}\n`;
       } else {
-        userPrompt += `- 프로그램명: ${p.programName ? p.programName.trim() : (data?.programName ? data.programName.trim() : "")}\n`;
-        userPrompt += `- 관찰내용: ${p.observation ? p.observation.trim() : (data?.observation ? data.observation.trim() : "")}\n`;
-        userPrompt += `- 지원내용: ${p.support ? p.support.trim() : (data?.support ? data.support.trim() : "")}\n`;
-        userPrompt += `- 의미 있는 반응: ${p.reaction ? p.reaction.trim() : (data?.reaction ? data.reaction.trim() : "")}\n`;
-        userPrompt += `- 차주 지원계획: ${p.plan ? p.plan.trim() : (data?.plan && data.plan.trim() ? data.plan.trim() : "빈칸(입력하지 않았음. 절대 마음대로 차주 지원계획이나 그에 관한 언급을 지어내서 적지 마십시오.)")}\n`;
+        // 프로그램 일지: 공통 프로그램명은 사용하되, 개별 관찰내용은 절대 타인의 것을 fallback하지 않음!
+        const progName = (p.programName && p.programName.trim()) || (data?.programName && data.programName.trim()) || "";
+        const obs = (p.observation && p.observation.trim()) || "";
+        const sup = (p.support && p.support.trim()) || (data?.support && data.support.trim()) || "";
+        const reac = (p.reaction && p.reaction.trim()) || "";
+        const pln = (p.plan && p.plan.trim()) || "";
+
+        userPrompt += `- 프로그램명: ${progName}\n`;
+        userPrompt += `- 관찰내용: ${obs ? obs : "특이 돌발행동 없이 진행 순서에 따라 활동에 성실히 참여함"}\n`;
+        userPrompt += `- 지원내용: ${sup ? sup : "활동 과정을 세심히 살피며 필요한 단계별 개별 지원 제공"}\n`;
+        userPrompt += `- 의미 있는 반응: ${reac ? reac : "활동 과정에 집중하며 안정적인 참여 반응을 보임"}\n`;
+        userPrompt += `- 차주 지원계획: ${pln ? pln : "빈칸(입력하지 않았음. 절대 마음대로 차주 지원계획이나 그에 관한 언급을 지어내서 적지 마십시오.)"}\n`;
       }
     });
 
     userPrompt += `
-
-※ 작성 지침: 단순 조사나 어미만 바꾸는 데 머무르지 말고, 제공된 입력 메모와 키워드를 재료 삼아 활동 맥락, 참여 과정, 지원 및 반응, 종합적 참여 특성을 유기적으로 연결하여 전문적이고 풍성한 완성된 문단으로 작성해 주십시오.
+★작성 지침★
+1. [지능적 배경 융합 & 풍성한 자율 서술]: 사용자가 적당히 간략한 키워드나 메모만 적었더라도, 각 이용인의 [평소 기본 배경특성](성향, 소통방식, 행동특성)을 적극적으로 읽어내어 직원의 맞춤 지원과 이용인의 긍정적 반응이 살아있는 전문적 문장으로 알아서 풍성하게 써주십시오. 사용자가 적은 말을 앵무새처럼 되풀이하지 마십시오.
+2. [부정행동 날조 금지]: 타해, 폭력, 신발 던지기 등 극단적인 부정적 문제행동은 사용자가 메모에 적지 않은 한 결코 지어내지 마십시오.
+3. [개별성 보장]: 특정 이용인의 관찰 메모(예: 신발 던지기)는 오직 그 이용인의 기록에만 들어가야 하며, 다른 이용인들에게 절대로 퍼뜨리지 마십시오.
 
 ★필수 중요 출력 형식 규칙★
 여러 명의 이용인의 기록을 생성할 때는 반드시 각 이용인별 최종 생성된 일지 기록을 아래와 같이 명확한 태그로 감싸서 한 번에 줄줄이 출력해야 합니다.
@@ -191,7 +223,7 @@ export async function generateCareLog(params: {
 (김철수의 전문 기록 본문...)
 [END:김철수]
 
-반드시 위의 [START:이름]과 [END:이름] 태그 형식을 한치도 틀림없이 정확히 적용하여 응답해 주십시오. 각 이용인 일지 본문 내부에는 이용인의 이름을 노출하지 마십시오 (형식 규칙에 맞춰 본문만 작성).
+반드시 위의 [START:이름]과 [END:이름] 태그 형식을 한치도 틀림없이 정확히 적용하여 응답해 주십시오. 각 이용인 일지 본문 내부에는 이용인의 이름을 노출하지 마십시오.
 `;
   } else {
     userPrompt = `
@@ -200,17 +232,31 @@ export async function generateCareLog(params: {
 날짜: ${date || ""}
 `;
 
+    if (clientTraits) {
+      const traitParts: string[] = [];
+      if (clientTraits.personality?.trim()) traitParts.push(`성향: ${clientTraits.personality.trim()}`);
+      if (clientTraits.communication?.trim()) traitParts.push(`소통방식: ${clientTraits.communication.trim()}`);
+      if (clientTraits.behaviorTraits?.trim()) traitParts.push(`행동특성/주의사항: ${clientTraits.behaviorTraits.trim()}`);
+      if (clientTraits.notes?.trim()) traitParts.push(`기타특징: ${clientTraits.notes.trim()}`);
+      if (traitParts.length > 0) {
+        userPrompt += `[평소 기본 배경특성]: ${traitParts.join(" | ")}\n`;
+      }
+    }
+
     if (type === "생활일지") {
       userPrompt += `
 입력된 내용:
-- 입퇴소: ${data?.transit ? data.transit.trim() : "빈칸(일반적인 송영 서비스 이용)"}
-- 위생과 청결: ${data?.hygiene ? data.hygiene.trim() : "빈칸(원활함)"}
-- 식생활: ${data?.diet ? data.diet.trim() : "빈칸(양호함)"}
-- 건강관리: ${data?.health ? data.health.trim() : "양호함 / 체온: 정상"}
+- 입퇴소: ${data?.transit && data.transit.trim() ? data.transit.trim() : "빈칸(일반적인 송영 서비스 이용)"}
+- 위생과 청결: ${data?.hygiene && data.hygiene.trim() ? data.hygiene.trim() : "빈칸(원활함)"}
+- 식생활: ${data?.diet && data.diet.trim() ? data.diet.trim() : "빈칸(양호함)"}
+- 건강관리: ${data?.health && data.health.trim() ? data.health.trim() : "양호함 / 체온: 정상"}
 - 프로그램: ${data?.program ? data.program.trim() : ""}
 - 기타사항: ${data?.others ? data.others.trim() : ""}
 
-※ 작성 지침: 입력된 키워드와 짧은 메모의 조사/어미만 바꾸는 데 그치지 말고, 제공된 내용을 재료 삼아 활동 맥락과 상황, 지원 및 반응을 연결하여 2~3문장의 풍성하고 자연스러운 전문 기록 문장으로 작성해 주십시오. 단, 입력된 실제 발화(큰따옴표 인용), 특정 대상, 구체적인 신체 부위 및 동작, 이동 방향 등 구체적 관찰정보는 포괄적 표현으로 대체하지 말고 기록에 온전히 드러나게 작성하십시오.
+※ 작성 지침:
+1. [배경 융합 & 알아서 써주기]: 사용자가 '밥 잘 먹음', '산책 감'처럼 적당히 간략하게 입력했더라도, 이용인의 [평소 기본 배경특성]과 주간보호 일과의 맥락을 적극 활용하여 2~3문장의 매끄럽고 유려한 전문 기록으로 알아서 풍성하게 작성해 주십시오. 사용자의 짧은 단어만을 앵무새처럼 베껴 쓰지 마십시오.
+2. [부정행동 날조 금지]: 타해, 폭력, 자해, 돌발행동 등 작성자가 명시하지 않은 부정적 사건은 절대로 지어내지 마십시오.
+3. [금지어 엄수]: '배변' 단어 절대 금지 ('소변', '대변', '용변' 사용), '교사' 금지 ('직원' 사용), '대상자' 금지 ('이용인' 사용), '등원/하원' 금지 ('입소/퇴소' 사용).
     `;
     } else {
       userPrompt += `
@@ -221,19 +267,29 @@ export async function generateCareLog(params: {
 - 의미 있는 반응: ${data?.reaction || ""}
 - 차주 지원계획: ${data?.plan && data.plan.trim() ? data.plan.trim() : "빈칸(입력하지 않았음. 절대 마음대로 차주 지원계획이나 그에 관한 언급을 지어내서 적지 마십시오.)"}
 
-※ 작성 지침: 조사나 어미만 바꾸는 것에 머무르지 말고, 입력된 메모를 바탕으로 활동 맥락, 구체적 참여/행동, 직원의 지원과 반응, 종합적 참여 특성을 유기적으로 연결하여 3~5문장의 풍성하고 완성도 높은 하나의 문단으로 전문 서술해 주십시오. 단, 입력된 실제 발화(큰따옴표 인용), 특정 대상, 구체적인 신체 부위 및 동작, 이동 방향 등 구체적 관찰정보는 포괄적 표현으로 대체하지 말고 기록에 온전히 드러나게 작성하십시오.
+※ 작성 지침:
+1. [지능적 배경 융합 & 완성도 높은 서술]: 사용자가 거칠거나 간략한 키워드만 적었더라도, 이용인의 [평소 기본 배경특성](성향, 소통방식, 행동특성)을 적극적으로 읽어내어 '활동 맥락 - 이용인의 고유한 참여/행동 - 직원의 맞춤 지원 - 의미 있는 성취와 정서적 반응'을 유기적으로 엮어 3~5문장의 완성도 높은 한 문단으로 알아서 풍성하게 작성해 주십시오. 사용자가 적은 단어만 앵무새처럼 되풀이하지 마십시오.
+2. [부정행동 날조 금지]: 타해, 폭력, 자해, 신발 던지기 등 입력되지 않은 극단적 돌발행동은 결코 상상하여 적지 마십시오.
+3. [차주 지원계획]: 빈칸인 경우 절대로 지어내지 말고 생략하십시오.
     `;
     }
   }
 
   try {
+    const config: any = {
+      systemInstruction: SYSTEM_PROMPT,
+      temperature: 0.65, // 단순 복사/앵무새 탈피 및 이용인 배경 특성과의 자연스러운 문맥 융합
+    };
+
+    // gemini-3.8-flash의 경우 기본 Thinking(추론)이 HIGH로 동작하여 토큰 폭증/타임아웃을 유발하므로 LOW로 최적화
+    if (selectedModel === "gemini-3.8-flash") {
+      config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+    }
+
     const response = await activeAi.models.generateContent({
       model: selectedModel,
       contents: userPrompt,
-      config: {
-        systemInstruction: SYSTEM_PROMPT,
-        temperature: 0.7,
-      },
+      config,
     });
 
     return {
@@ -247,13 +303,14 @@ export async function generateCareLog(params: {
       return {
         success: false,
         status: 429,
-        error: "Gemini API 사용량 또는 속도 제한에 도달했습니다. 입력된 기록은 브라우저에 보존되어 있으니 잠시 후 다시 시도하시거나, 개인/기관용 Gemini API 키를 설정해 주십시오. 계속 발생하면 Google AI Studio에서 해당 프로젝트의 실제 Rate limit/RPD와 결제 연결 상태를 확인해야 합니다."
+        error: "Gemini API 사용량 또는 속도 제한(429)에 도달했습니다. 3.1 Flash Lite 모델은 제한이 덜하며 빠르게 동작합니다. 잠시 후 다시 시도하시거나 상단 설정에서 개인 API 키를 연결해 주십시오."
       };
     }
+    const message = error?.message ? ` (${error.message})` : "";
     return {
       success: false,
       status: 500,
-      error: "기록 생성 중 일시적인 서버 오류가 발생했습니다. 잠시 후 다시 시도해 주십시오."
+      error: `기록 생성 중 일시적인 오류가 발생했습니다${message}. 'Gemini 3.1 Flash Lite' 모델로 변경 후 다시 시도해 보시기 바랍니다.`
     };
   }
 }
